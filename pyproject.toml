@@ -1,0 +1,25 @@
+[project]
+name = "sixty-nuts"
+version = "0.0.1"
+description = "Sixty Nuts - NIP-60 Cashu Wallet Implementation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "websockets>=15.0.1",
+    "bech32>=1.2.0",
+    "coincurve>=21.0.0",
+    "cryptography>=45.0.3",
+]
+
+[dependency-groups]
+dev = ["pytest-asyncio>=1.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+markers = ["asyncio: mark test as async"]

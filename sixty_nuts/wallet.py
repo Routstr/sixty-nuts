@@ -1,0 +1,899 @@
+from __future__ import annotations
+
+from enum import IntEnum
+from typing import Literal, TypedDict
+import base64
+import hashlib
+import json
+import secrets
+import time
+from dataclasses import dataclass
+
+from coincurve import PrivateKey
+
+from .mint import Mint, Proof, BlindedMessage
+from .relay import NostrRelay, NostrEvent, RelayError
+from .nip44 import NIP44Encrypt  # Import NIP-44 encryption
+
+import httpx  # shared HTTP client for all Mint objects
+
+# Attempt optional bech32 decoding support for nsec keys
+try:
+    from bech32 import bech32_decode, convertbits  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
+    bech32_decode = None  # type: ignore
+    convertbits = None  # type: ignore
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Protocol-level definitions
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class EventKind(IntEnum):
+    """Nostr event kinds relevant to NIP-60."""
+
+    RELAY_RECOMMENDATIONS = 10019
+    Wallet = 17375  # wallet metadata
+    Token = 7375  # unspent proofs
+    History = 7376  # optional transaction log
+    QuoteTracker = 7374  # mint quote tracker (optional)
+    Delete = 5  # NIP-09 delete event
+
+
+class ProofDict(TypedDict):
+    id: str
+    amount: int
+    secret: str
+    C: str
+
+
+@dataclass
+class WalletState:
+    """Current wallet state."""
+
+    balance: int
+    proofs: list[ProofDict]
+    mint_keysets: dict[str, list[dict[str, str]]]  # mint_url -> keysets
+    proof_to_event_id: dict[
+        str, str
+    ] | None = None  # proof_id -> event_id mapping (TODO)
+
+
+Direction = Literal["in", "out"]
+
+
+class WalletError(Exception):
+    """Base class for wallet errors."""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wallet implementation skeleton
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class Wallet:
+    """Lightweight stateless Cashu wallet implementing NIP-60."""
+
+    def __init__(
+        self,
+        nsec: str,  # nostr private key
+        *,
+        mint_urls: list[str] | None = None,  # cashu mint urls (can have multiple)
+        currency: Literal["sat", "msat", "usd"] = "sat",
+        wallet_privkey: str | None = None,  # separate privkey for P2PK ecash (NIP-61)
+        relays: list[str] | None = None,  # nostr relays to use
+    ) -> None:
+        self.nsec = nsec
+        self._privkey = self._decode_nsec(nsec)
+        self.mint_urls: list[str] = mint_urls or ["https://mint.minibits.cash/Bitcoin"]
+        self.currency = currency
+        # Generate wallet privkey if not provided
+        if wallet_privkey is None:
+            wallet_privkey = self._generate_privkey()
+        self.wallet_privkey = wallet_privkey
+        self._wallet_privkey_obj = PrivateKey(bytes.fromhex(wallet_privkey))
+
+        self.relays: list[str] = relays or [
+            "wss://relay.damus.io",
+            "wss://relay.nostr.band",
+            "wss://nos.lol",
+        ]
+
+        # Mint and relay instances
+        self.mints: dict[str, Mint] = {}
+        self.relay_instances: list[NostrRelay] = []
+
+        # Shared HTTP client reused by all Mint objects
+        self.mint_client = httpx.AsyncClient()
+
+    # ───────────────────────── Crypto Helpers ─────────────────────────────────
+
+    def _decode_nsec(self, nsec: str) -> PrivateKey:
+        """Decode `nsec` (bech32 as per Nostr) or raw hex private key."""
+        if nsec.startswith("nsec1"):
+            if bech32_decode is None or convertbits is None:
+                raise NotImplementedError(
+                    "bech32 library missing – install `bech32` to use bech32-encoded nsec keys"
+                )
+
+            hrp, data = bech32_decode(nsec)
+            if hrp != "nsec" or data is None:
+                raise ValueError("Malformed nsec bech32 string")
+
+            decoded = bytes(convertbits(data, 5, 8, False))  # type: ignore
+            if len(decoded) != 32:
+                raise ValueError("Invalid nsec length after decoding")
+            return PrivateKey(decoded)
+
+        # Fallback – treat as raw hex key
+        return PrivateKey(bytes.fromhex(nsec))
+
+    def _generate_privkey(self) -> str:
+        """Generate a new secp256k1 private key for wallet P2PK operations."""
+        return PrivateKey().to_hex()
+
+    def _get_pubkey(self, privkey: PrivateKey | None = None) -> str:
+        """Get hex public key from private key (defaults to main nsec)."""
+        if privkey is None:
+            privkey = self._privkey
+        return privkey.public_key.format(compressed=True).hex()
+
+    def _sign_event(self, event: dict) -> dict:
+        """Sign a Nostr event with the user's private key."""
+        # Ensure event has required fields
+        event["pubkey"] = self._get_pubkey()
+        event["created_at"] = event.get("created_at", int(time.time()))
+        event["id"] = self._compute_event_id(event)
+
+        # Sign the event
+        sig = self._privkey.sign_schnorr(bytes.fromhex(event["id"]))
+        event["sig"] = sig.hex()
+
+        return event
+
+    def _compute_event_id(self, event: dict) -> str:
+        """Compute Nostr event ID (hash of canonical JSON)."""
+        # Canonical format: [0, pubkey, created_at, kind, tags, content]
+        canonical = json.dumps(
+            [
+                0,
+                event["pubkey"],
+                event["created_at"],
+                event["kind"],
+                event["tags"],
+                event["content"],
+            ],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    # ───────────────────────── NIP-44 Encryption ─────────────────────────────────
+
+    def _nip44_encrypt(
+        self, plaintext: str, recipient_pubkey: str | None = None
+    ) -> str:
+        """Encrypt content using NIP-44 v2."""
+        if recipient_pubkey is None:
+            recipient_pubkey = self._get_pubkey()
+
+        return NIP44Encrypt.encrypt(plaintext, self._privkey, recipient_pubkey)
+
+    def _nip44_decrypt(self, ciphertext: str, sender_pubkey: str | None = None) -> str:
+        """Decrypt content using NIP-44 v2."""
+        if sender_pubkey is None:
+            sender_pubkey = self._get_pubkey()
+
+        return NIP44Encrypt.decrypt(ciphertext, self._privkey, sender_pubkey)
+
+    def _create_event(
+        self,
+        kind: int,
+        content: str = "",
+        tags: list[list[str]] | None = None,
+    ) -> dict:
+        """Create unsigned Nostr event structure."""
+        return {
+            "kind": kind,
+            "content": content,
+            "tags": tags or [],
+            "created_at": int(time.time()),
+        }
+
+    # ───────────────────────── Helper Methods ─────────────────────────────────
+
+    def _get_mint(self, mint_url: str) -> Mint:
+        """Get or create mint instance for URL."""
+        if mint_url not in self.mints:
+            self.mints[mint_url] = Mint(mint_url, client=self.mint_client)
+        return self.mints[mint_url]
+
+    async def _get_relay_connections(self) -> list[NostrRelay]:
+        """Get relay connections, discovering if needed."""
+        if not self.relay_instances:
+            # Try to discover relays
+            discovered_relays = await self._discover_relays()
+            relay_urls = discovered_relays or self.relays
+
+            for url in relay_urls[:3]:  # Use up to 3 relays
+                relay = NostrRelay(url)
+                await relay.connect()
+                self.relay_instances.append(relay)
+
+        return self.relay_instances
+
+    async def _discover_relays(self) -> list[str]:
+        """Discover relays from kind:10019 events."""
+        # Use a well-known relay to bootstrap
+        bootstrap_relay = NostrRelay("wss://relay.damus.io")
+        try:
+            await bootstrap_relay.connect()
+            relays = await bootstrap_relay.fetch_relay_recommendations(
+                self._get_pubkey()
+            )
+            return relays
+        except Exception:
+            return []
+        finally:
+            await bootstrap_relay.disconnect()
+
+    async def _publish_to_relays(self, event: dict) -> str:
+        """Publish event to all relays and return event ID."""
+        relays = await self._get_relay_connections()
+        event_dict = NostrEvent(**event)  # type: ignore
+
+        # Try to publish to at least one relay
+        published = False
+        for relay in relays:
+            try:
+                if await relay.publish_event(event_dict):
+                    published = True
+            except Exception:
+                continue
+
+        if not published:
+            raise RelayError("Failed to publish event to any relay")
+
+        return event["id"]
+
+    def _serialize_proofs_for_token(
+        self, proofs: list[ProofDict], mint_url: str
+    ) -> str:
+        """Serialize proofs into a Cashu token format."""
+        # Cashu token format: cashuA<base64url(json)>
+        token_data = {
+            "token": [{"mint": mint_url, "proofs": proofs}],
+            "unit": self.currency,
+            "memo": "NIP-60 wallet transfer",
+        }
+        json_str = json.dumps(token_data, separators=(",", ":"))
+        encoded = base64.urlsafe_b64encode(json_str.encode()).decode().rstrip("=")
+        return f"cashuA{encoded}"
+
+    def _parse_cashu_token(self, token: str) -> tuple[str, list[ProofDict]]:
+        """Parse Cashu token and return (mint_url, proofs)."""
+        if not token.startswith("cashu"):
+            raise ValueError("Invalid token format")
+
+        # Remove prefix and decode
+        encoded = token[6:]  # Remove "cashuA"
+        # Add correct padding – (-len) % 4 equals 0,1,2,3
+        encoded += "=" * ((-len(encoded)) % 4)
+
+        decoded = base64.urlsafe_b64decode(encoded).decode()
+        token_data = json.loads(decoded)
+
+        # Extract mint and proofs
+        mint_info = token_data["token"][0]
+        return mint_info["mint"], mint_info["proofs"]
+
+    # ───────────────────────── Wallet State Management ─────────────────────────
+
+    async def create_wallet_event(self) -> str:
+        """Create or update the replaceable wallet event (kind 17375).
+
+        Returns the published event id.
+        """
+        # Create content array with wallet metadata
+        content_data = [
+            ["privkey", self.wallet_privkey],
+        ]
+        for mint_url in self.mint_urls:
+            content_data.append(["mint", mint_url])
+
+        # Encrypt content
+        content_json = json.dumps(content_data)
+        encrypted_content = self._nip44_encrypt(content_json)
+
+        # Prepare public tags for quick filtering (spec requires at least one `mint` tag)
+        tags = [["mint", url] for url in self.mint_urls]
+
+        # Create replaceable wallet event
+        event = self._create_event(
+            kind=EventKind.Wallet,
+            content=encrypted_content,
+            tags=tags,
+        )
+
+        # Sign and publish
+        signed_event = self._sign_event(event)
+        return await self._publish_to_relays(signed_event)
+
+    async def fetch_wallet_state(self) -> WalletState:
+        """Fetch wallet, token events and compute balance."""
+        relays = await self._get_relay_connections()
+        pubkey = self._get_pubkey()
+
+        # Fetch all wallet-related events
+        all_events: list[NostrEvent] = []
+        for relay in relays:
+            try:
+                events = await relay.fetch_wallet_events(pubkey)
+                all_events.extend(events)
+            except Exception:
+                continue
+
+        # Find wallet event
+        wallet_event = None
+        for event in all_events:
+            if event["kind"] == EventKind.Wallet:
+                wallet_event = event
+                break
+
+        # Parse wallet metadata
+        if wallet_event:
+            decrypted = self._nip44_decrypt(wallet_event["content"])
+            wallet_data = json.loads(decrypted)
+
+            # Update mint URLs from wallet event
+            self.mint_urls = []
+            for item in wallet_data:
+                if item[0] == "mint":
+                    self.mint_urls.append(item[1])
+                elif item[0] == "privkey":
+                    self.wallet_privkey = item[1]
+
+        # Collect token events
+        token_events = [e for e in all_events if e["kind"] == EventKind.Token]
+
+        # Track deleted token events
+        deleted_ids = set()
+        for event in all_events:
+            if event["kind"] == EventKind.Delete:
+                for tag in event["tags"]:
+                    if tag[0] == "e":
+                        deleted_ids.add(tag[1])
+
+        # Aggregate unspent proofs
+        all_proofs: list[ProofDict] = []
+        for event in token_events:
+            if event["id"] in deleted_ids:
+                continue
+
+            # Decrypt and parse proofs
+            decrypted = self._nip44_decrypt(event["content"])
+            token_data = json.loads(decrypted)
+            proofs = token_data.get("proofs", [])
+            all_proofs.extend(proofs)
+
+        # Calculate balance
+        balance = sum(p["amount"] for p in all_proofs)
+
+        # Fetch mint keysets
+        mint_keysets = {}
+        for mint_url in self.mint_urls:
+            mint = self._get_mint(mint_url)
+            try:
+                keys_resp = await mint.get_keys()
+                mint_keysets[mint_url] = keys_resp.get("keysets", [])
+            except Exception:
+                mint_keysets[mint_url] = []
+
+        return WalletState(
+            balance=balance,
+            proofs=all_proofs,
+            mint_keysets=mint_keysets,
+        )
+
+    # ───────────────────────────── Token Events ───────────────────────────────
+
+    async def publish_token_event(
+        self,
+        proofs: list[ProofDict],
+        *,
+        deleted_token_ids: list[str] | None = None,
+    ) -> str:
+        """Publish encrypted token event (kind 7375) and return its id."""
+        # Assume all proofs are from the same mint (first mint URL)
+        mint_url = self.mint_urls[0]
+
+        # Create token event content
+        content_data = {
+            "mint": mint_url,
+            "proofs": proofs,
+        }
+
+        if deleted_token_ids:
+            content_data["del"] = deleted_token_ids
+
+        # Encrypt content
+        content_json = json.dumps(content_data)
+        encrypted_content = self._nip44_encrypt(content_json)
+
+        # Create token event
+        event = self._create_event(
+            kind=EventKind.Token,
+            content=encrypted_content,
+            tags=[],
+        )
+
+        # Sign and publish
+        signed_event = self._sign_event(event)
+        return await self._publish_to_relays(signed_event)
+
+    async def delete_token_event(self, event_id: str) -> None:
+        """Delete a token event via NIP-09 (kind 5)."""
+        # Create delete event
+        event = self._create_event(
+            kind=EventKind.Delete,
+            content="",
+            tags=[
+                ["e", event_id],
+                ["k", str(EventKind.Token.value)],
+            ],
+        )
+
+        # Sign and publish
+        signed_event = self._sign_event(event)
+        await self._publish_to_relays(signed_event)
+
+    # ──────────────────────────── History Events ──────────────────────────────
+
+    async def publish_spending_history(
+        self,
+        *,
+        direction: Literal["in", "out"],
+        amount: int,
+        created_token_ids: list[str] | None = None,
+        destroyed_token_ids: list[str] | None = None,
+        redeemed_event_id: str | None = None,
+    ) -> str:
+        """Publish kind 7376 spending history event and return its id."""
+        # Build encrypted content
+        content_data = [
+            ["direction", direction],
+            ["amount", str(amount)],
+        ]
+
+        # Add e-tags for created tokens (encrypted)
+        if created_token_ids:
+            for token_id in created_token_ids:
+                content_data.append(["e", token_id, "", "created"])
+
+        # Add e-tags for destroyed tokens (encrypted)
+        if destroyed_token_ids:
+            for token_id in destroyed_token_ids:
+                content_data.append(["e", token_id, "", "destroyed"])
+
+        # Encrypt content
+        content_json = json.dumps(content_data)
+        encrypted_content = self._nip44_encrypt(content_json)
+
+        # Build tags (redeemed tags stay unencrypted)
+        tags = []
+        if redeemed_event_id:
+            tags.append(["e", redeemed_event_id, "", "redeemed"])
+
+        # Create history event
+        event = self._create_event(
+            kind=EventKind.History,
+            content=encrypted_content,
+            tags=tags,
+        )
+
+        # Sign and publish
+        signed_event = self._sign_event(event)
+        return await self._publish_to_relays(signed_event)
+
+    # ─────────────────────────────── Receive ──────────────────────────────────
+
+    async def redeem(self, token: str) -> None:
+        """Redeem a Cashu token into the wallet balance."""
+        # Parse token
+        mint_url, proofs = self._parse_cashu_token(token)
+        mint = self._get_mint(mint_url)
+
+        # Convert to mint proof format
+        mint_proofs: list[Proof] = []
+        for p in proofs:
+            mint_proof = Proof(
+                id=p["id"],
+                amount=p["amount"],
+                secret=p["secret"],
+                C=p["C"],
+            )
+            mint_proofs.append(mint_proof)
+
+        # Create blinded messages for new proofs
+        # In production, implement proper blinding
+        outputs: list[BlindedMessage] = []
+        total_amount = sum(p["amount"] for p in proofs)
+
+        # Simple denomination split
+        remaining = total_amount
+        for denom in [64, 32, 16, 8, 4, 2, 1]:
+            while remaining >= denom:
+                secret = secrets.token_hex(32)
+                # Simplified - real implementation needs proper blinding
+                outputs.append(
+                    BlindedMessage(
+                        amount=denom,
+                        id=proofs[0]["id"],  # Use same keyset
+                        B_=secret,  # This should be blinded
+                    )
+                )
+                remaining -= denom
+
+        # Swap proofs for new ones
+        response = await mint.swap(inputs=mint_proofs, outputs=outputs)
+
+        # Convert signatures to proofs
+        new_proofs: list[ProofDict] = []
+        for i, sig in enumerate(response["signatures"]):
+            new_proofs.append(
+                ProofDict(
+                    id=sig["id"],
+                    amount=sig["amount"],
+                    secret=outputs[i]["B_"],  # Use the secret
+                    C=sig["C_"],
+                )
+            )
+
+        # Publish new token event
+        token_event_id = await self.publish_token_event(new_proofs)
+
+        # Publish spending history
+        await self.publish_spending_history(
+            direction="in",
+            amount=total_amount,
+            created_token_ids=[token_event_id],
+        )
+
+    async def create_quote(self, amount: int) -> str:  # renamed from mint()
+        """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string."""
+        mint = self._get_mint(self.mint_urls[0])
+
+        # Create mint quote
+        quote_resp = await mint.create_mint_quote(
+            unit=self.currency,
+            amount=amount,
+        )
+
+        # Optionally publish quote tracker event
+        # (skipping for simplicity)
+
+        # TODO: Implement quote tracking as per NIP-60:
+        # await self.publish_quote_tracker(
+        #     quote_id=quote_resp["quote"],
+        #     mint_url=self.mint_urls[0],
+        #     expiration=int(time.time()) + 14 * 24 * 60 * 60  # 2 weeks
+        # )
+
+        return quote_resp["request"]  # Return Lightning invoice
+
+    async def check_quote_status(self, quote_id: str) -> dict[str, object]:
+        """Check whether a quote has been paid and redeem proofs if so."""
+        mint = self._get_mint(self.mint_urls[0])
+
+        # Check quote status
+        quote_status = await mint.get_mint_quote(quote_id)
+
+        if quote_status.get("paid") and quote_status.get("state") == "PAID":
+            # Create blinded messages for the amount
+            amount = quote_status["amount"]
+            outputs: list[BlindedMessage] = []
+
+            # Get active keyset
+            keys_resp = await mint.get_keys()
+            keysets = keys_resp.get("keysets", [])
+            keyset_id = keysets[0]["id"] if keysets else ""
+
+            # Simple denomination split
+            remaining = amount
+            for denom in [64, 32, 16, 8, 4, 2, 1]:
+                while remaining >= denom:
+                    secret = secrets.token_hex(32)
+                    outputs.append(
+                        BlindedMessage(
+                            amount=denom,
+                            id=keyset_id,
+                            B_=secret,
+                        )
+                    )
+                    remaining -= denom
+
+            # Mint tokens
+            mint_resp = await mint.mint(quote=quote_id, outputs=outputs)
+
+            # Convert to proofs
+            new_proofs: list[ProofDict] = []
+            for i, sig in enumerate(mint_resp["signatures"]):
+                new_proofs.append(
+                    ProofDict(
+                        id=sig["id"],
+                        amount=sig["amount"],
+                        secret=outputs[i]["B_"],
+                        C=sig["C_"],
+                    )
+                )
+
+            # Publish token event
+            token_event_id = await self.publish_token_event(new_proofs)
+
+            # Publish spending history
+            await self.publish_spending_history(
+                direction="in",
+                amount=amount,
+                created_token_ids=[token_event_id],
+            )
+
+        return dict(quote_status)  # type: ignore
+
+    # ─────────────────────────────── Send ─────────────────────────────────────
+
+    async def melt(self, invoice: str) -> None:
+        """Pay a Lightning invoice using proofs (melt)."""
+        mint = self._get_mint(self.mint_urls[0])
+
+        # Get current wallet state
+        state = await self.fetch_wallet_state()
+
+        # Create melt quote
+        melt_quote = await mint.create_melt_quote(
+            unit=self.currency,
+            request=invoice,
+        )
+
+        quote_id = melt_quote["quote"]
+        total_needed = melt_quote["amount"] + melt_quote["fee_reserve"]
+
+        # Select proofs to spend
+        # TODO: Implement better coin selection algorithm to minimize
+        # the number of proofs used and optimize privacy
+        selected_proofs: list[ProofDict] = []
+        selected_amount = 0
+        old_token_ids: list[str] = []
+
+        for proof in state.proofs:
+            if selected_amount >= total_needed:
+                break
+            selected_proofs.append(proof)
+            selected_amount += proof["amount"]
+
+        if selected_amount < total_needed:
+            raise WalletError(
+                f"Insufficient balance. Need {total_needed}, have {selected_amount}"
+            )
+
+        # Convert to mint proof format
+        mint_proofs: list[Proof] = []
+        for p in selected_proofs:
+            mint_proofs.append(Proof(**p))  # type: ignore
+
+        # Calculate change
+        change_amount = selected_amount - total_needed
+        change_outputs: list[BlindedMessage] = []
+
+        if change_amount > 0:
+            # Create blinded messages for change
+            remaining = change_amount
+            keyset_id = selected_proofs[0]["id"]
+
+            for denom in [64, 32, 16, 8, 4, 2, 1]:
+                while remaining >= denom:
+                    secret = secrets.token_hex(32)
+                    change_outputs.append(
+                        BlindedMessage(
+                            amount=denom,
+                            id=keyset_id,
+                            B_=secret,
+                        )
+                    )
+                    remaining -= denom
+
+        # Execute melt
+        melt_resp = await mint.melt(
+            quote=quote_id,
+            inputs=mint_proofs,
+            outputs=change_outputs if change_outputs else None,
+        )
+
+        # Delete old token events (find which events contained the spent proofs)
+        # For simplicity, assume one event per mint
+        # In production, track which proofs belong to which events
+
+        # TODO: This is incorrect - need to track which proofs belong to which
+        # token events to properly delete them. Current implementation doesn't
+        # maintain this mapping, violating NIP-60 requirements.
+
+        # Create new token event for change
+        if melt_resp.get("change"):
+            change_proofs: list[ProofDict] = []
+            for i, sig in enumerate(melt_resp["change"]):
+                change_proofs.append(
+                    ProofDict(
+                        id=sig["id"],
+                        amount=sig["amount"],
+                        secret=change_outputs[i]["B_"],
+                        C=sig["C_"],
+                    )
+                )
+
+            token_event_id = await self.publish_token_event(
+                change_proofs,
+                deleted_token_ids=old_token_ids,
+            )
+            created_ids = [token_event_id]
+        else:
+            created_ids = []
+
+        # Publish spending history
+        await self.publish_spending_history(
+            direction="out",
+            amount=melt_quote["amount"],
+            created_token_ids=created_ids,
+            destroyed_token_ids=old_token_ids,
+        )
+
+    async def send(self, amount: int) -> str:
+        """Send Cashu tokens of *amount* and return the serialized token."""
+        # Get current wallet state
+        state = await self.fetch_wallet_state()
+
+        # Select proofs to send
+        selected_proofs: list[ProofDict] = []
+        selected_amount = 0
+        remaining_proofs: list[ProofDict] = []
+
+        for proof in state.proofs:
+            if selected_amount < amount:
+                selected_proofs.append(proof)
+                selected_amount += proof["amount"]
+            else:
+                remaining_proofs.append(proof)
+
+        if selected_amount < amount:
+            raise WalletError(
+                f"Insufficient balance. Need {amount}, have {state.balance}"
+            )
+
+        # If we selected too much, need to split
+        if selected_amount > amount:
+            mint = self._get_mint(self.mint_urls[0])
+
+            # Convert to mint proofs
+            mint_proofs: list[Proof] = []
+            for p in selected_proofs:
+                mint_proofs.append(Proof(**p))  # type: ignore
+
+            # Create outputs for exact amount and change
+            outputs: list[BlindedMessage] = []
+            keyset_id = selected_proofs[0]["id"]
+
+            # Outputs for sending
+            send_outputs: list[BlindedMessage] = []
+            remaining = amount
+            for denom in [64, 32, 16, 8, 4, 2, 1]:
+                while remaining >= denom:
+                    secret = secrets.token_hex(32)
+                    output = BlindedMessage(
+                        amount=denom,
+                        id=keyset_id,
+                        B_=secret,
+                    )
+                    outputs.append(output)
+                    send_outputs.append(output)
+                    remaining -= denom
+
+            # Outputs for change
+            change_amount = selected_amount - amount
+            remaining = change_amount
+            for denom in [64, 32, 16, 8, 4, 2, 1]:
+                while remaining >= denom:
+                    secret = secrets.token_hex(32)
+                    outputs.append(
+                        BlindedMessage(
+                            amount=denom,
+                            id=keyset_id,
+                            B_=secret,
+                        )
+                    )
+                    remaining -= denom
+
+            # Swap for exact denominations
+            swap_resp = await mint.swap(inputs=mint_proofs, outputs=outputs)
+
+            # Separate send and change proofs
+            send_proofs: list[ProofDict] = []
+            change_proofs: list[ProofDict] = []
+
+            for i, sig in enumerate(swap_resp["signatures"]):
+                proof = ProofDict(
+                    id=sig["id"],
+                    amount=sig["amount"],
+                    secret=outputs[i]["B_"],
+                    C=sig["C_"],
+                )
+
+                if i < len(send_outputs):
+                    send_proofs.append(proof)
+                else:
+                    change_proofs.append(proof)
+
+            # Update remaining proofs
+            remaining_proofs.extend(change_proofs)
+            selected_proofs = send_proofs
+
+        # Create Cashu token
+        token = self._serialize_proofs_for_token(selected_proofs, self.mint_urls[0])
+
+        # Delete old token events and create new one for remaining
+        if remaining_proofs:
+            token_event_id = await self.publish_token_event(remaining_proofs)
+            created_ids = [token_event_id]
+        else:
+            created_ids = []
+
+        # Publish spending history
+        await self.publish_spending_history(
+            direction="out",
+            amount=amount,
+            created_token_ids=created_ids,
+        )
+
+        return token
+
+    async def roll_over_proofs(
+        self,
+        *,
+        spent_proofs: list[ProofDict],
+        unspent_proofs: list[ProofDict],
+        deleted_event_ids: list[str],
+    ) -> str:
+        """Roll over unspent proofs after a partial spend and return new token id."""
+        # Delete old token events
+        for event_id in deleted_event_ids:
+            await self.delete_token_event(event_id)
+
+        # Create new token event with unspent proofs
+        return await self.publish_token_event(
+            unspent_proofs,
+            deleted_token_ids=deleted_event_ids,
+        )
+
+    # ─────────────────────────────── Cleanup ──────────────────────────────────
+
+    async def aclose(self) -> None:
+        """Close underlying HTTP clients."""
+        await self.mint_client.aclose()
+
+        # Close relay connections
+        for relay in self.relay_instances:
+            await relay.disconnect()
+
+        # Close mint clients
+        for mint in self.mints.values():
+            await mint.aclose()
+
+    # ───────────────────────── Async context manager ──────────────────────────
+
+    async def __aenter__(self) -> "Wallet":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: D401  (simple return)
+        await self.aclose()
+
+
+if __name__ == "__main__":
+    ...
