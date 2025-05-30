@@ -3,7 +3,7 @@
 
 import pytest
 import httpx
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from sixty_nuts.mint import Mint, MintError, BlindedMessage, Proof
 
 
@@ -40,7 +40,7 @@ class TestMint:
 
     async def test_get_info(self, mint, mock_client):
         """Test get_info method."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "name": "Test Mint",
@@ -61,7 +61,7 @@ class TestMint:
 
     async def test_get_keys(self, mint, mock_client):
         """Test get_keys method."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "keysets": [
@@ -92,7 +92,7 @@ class TestMint:
 
     async def test_create_mint_quote(self, mint, mock_client):
         """Test create_mint_quote method."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "quote": "quote_id_123",
@@ -122,7 +122,7 @@ class TestMint:
 
     async def test_mint_tokens(self, mint, mock_client):
         """Test mint method."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "signatures": [
@@ -145,7 +145,7 @@ class TestMint:
 
     async def test_swap(self, mint, mock_client):
         """Test swap method."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "signatures": [
@@ -168,7 +168,7 @@ class TestMint:
 
     async def test_error_handling(self, mint, mock_client):
         """Test error handling."""
-        mock_response = AsyncMock()
+        mock_response = Mock()
         mock_response.status_code = 400
         mock_response.text = "Bad Request"
 

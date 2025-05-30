@@ -39,7 +39,12 @@ class TestNostrRelay:
         """Test relay connection."""
         mock_ws = AsyncMock()
         mock_ws.closed = False
-        mock_connect.return_value = mock_ws
+
+        # Make mock_connect async and return the mock_ws
+        async def async_connect(*args, **kwargs):
+            return mock_ws
+
+        mock_connect.side_effect = async_connect
 
         relay = NostrRelay("wss://relay.test.com")
         await relay.connect()
@@ -104,9 +109,20 @@ class TestNostrRelay:
         assert sent_message[0] == "EVENT"
         assert sent_message[1]["id"] == "event123"
 
-    async def test_fetch_events(self, relay, mock_websocket):
+    @patch("sixty_nuts.relay.websockets.connect")
+    @patch("sixty_nuts.relay.uuid4", return_value="sub_id")
+    async def test_fetch_events(self, mock_uuid, mock_connect):
         """Test fetching events."""
-        relay.ws = mock_websocket
+        mock_websocket = AsyncMock()
+        mock_websocket.closed = False
+
+        # Make mock_connect async and return the mock_websocket
+        async def async_connect(*args, **kwargs):
+            return mock_websocket
+
+        mock_connect.side_effect = async_connect
+
+        relay = NostrRelay("wss://relay.test.com")
 
         # Mock the response sequence
         event1 = {
