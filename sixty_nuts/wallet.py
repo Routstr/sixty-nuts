@@ -889,10 +889,66 @@ class Wallet:
     # ───────────────────────── Async context manager ──────────────────────────
 
     async def __aenter__(self) -> "Wallet":
+        """Enter async context and auto-initialize wallet."""
+        try:
+            # Try to fetch existing wallet state
+            await self.fetch_wallet_state()
+        except Exception:
+            # If no wallet exists or fetch fails, create a new wallet event
+            try:
+                await self.create_wallet_event()
+            except Exception:
+                # If we can't create a wallet event, that's okay -
+                # user might just want to do offline operations
+                pass
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:  # noqa: D401  (simple return)
         await self.aclose()
+
+    # ───────────────────────── Factory Methods ────────────────────────────────
+
+    @classmethod
+    async def create(
+        cls,
+        nsec: str,
+        *,
+        mint_urls: list[str] | None = None,
+        currency: Literal["sat", "msat", "usd"] = "sat",
+        wallet_privkey: str | None = None,
+        relays: list[str] | None = None,
+        auto_init: bool = True,
+    ) -> "Wallet":
+        """Create and optionally initialize a wallet with network operations.
+
+        Args:
+            nsec: Nostr private key
+            mint_urls: Cashu mint URLs
+            currency: Currency unit
+            wallet_privkey: Private key for P2PK operations
+            relays: Nostr relay URLs
+            auto_init: If True, create wallet event and fetch state
+
+        Returns:
+            Initialized wallet instance
+        """
+        wallet = cls(
+            nsec=nsec,
+            mint_urls=mint_urls,
+            currency=currency,
+            wallet_privkey=wallet_privkey,
+            relays=relays,
+        )
+
+        if auto_init:
+            try:
+                # Try to fetch existing state first
+                await wallet.fetch_wallet_state()
+            except Exception:
+                # If no wallet exists, create one
+                await wallet.create_wallet_event()
+
+        return wallet
 
 
 if __name__ == "__main__":
