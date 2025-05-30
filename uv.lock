@@ -26,35 +26,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cashu-nip60"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "bech32" },
-    { name = "coincurve" },
-    { name = "cryptography" },
-    { name = "httpx" },
-    { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bech32", specifier = ">=1.2.0" },
-    { name = "coincurve", specifier = ">=21.0.0" },
-    { name = "cryptography", specifier = ">=45.0.3" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "websockets", specifier = ">=15.0.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest-asyncio", specifier = ">=1.0.0" }]
-
-[[package]]
 name = "certifi"
 version = "2025.4.26"
 source = { registry = "https://pypi.org/simple" }
@@ -304,6 +275,35 @@ sdist = { url = "https://files.pythonhosted.org/packages/d0/d4/14f53324cb1a6381b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/30/05/ce271016e351fddc8399e546f6e23761967ee09c8c568bbfbecb0c150171/pytest_asyncio-1.0.0-py3-none-any.whl", hash = "sha256:4f024da9f1ef945e680dc68610b52550e36590a67fd31bb3b4943979a1f90ef3", size = 15976 },
 ]
+
+[[package]]
+name = "sixty-nuts"
+version = "0.0.1"
+source = { virtual = "." }
+dependencies = [
+    { name = "bech32" },
+    { name = "coincurve" },
+    { name = "cryptography" },
+    { name = "httpx" },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest-asyncio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bech32", specifier = ">=1.2.0" },
+    { name = "coincurve", specifier = ">=21.0.0" },
+    { name = "cryptography", specifier = ">=45.0.3" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "websockets", specifier = ">=15.0.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest-asyncio", specifier = ">=1.0.0" }]
 
 [[package]]
 name = "sniffio"
