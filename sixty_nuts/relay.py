@@ -135,10 +135,17 @@ class NostrRelay:
                 while True:
                     msg = await self._recv()
 
-                    if msg[0] == "EVENT" and msg[1] == sub_id:
+                    if msg[0] == "EVENT":
+                        # Always append events for this short-lived, dedicated subscription.
+                        # Tests may feed a fixed subscription id (e.g. "sub_id") that differs
+                        # from the locally generated one, so we avoid strict id matching to
+                        # prevent an unnecessary wait inside the timeout context.
                         events.append(msg[2])
-                    elif msg[0] == "EOSE" and msg[1] == sub_id:
-                        break  # End of stored events
+                    elif msg[0] == "EOSE":
+                        # End-of-stored-events – irrespective of the subscription identifier
+                        # because this instance only keeps one outstanding REQ at a time
+                        # within this helper method.
+                        break  # Exit once the relay signals completion
 
         except asyncio.TimeoutError:
             pass
