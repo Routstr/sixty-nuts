@@ -10,11 +10,16 @@ import time
 from dataclasses import dataclass
 import asyncio
 
-from coincurve import PrivateKey
+from coincurve import PrivateKey, PublicKey
 
 from .mint import Mint, Proof, BlindedMessage
 from .relay import NostrRelay, NostrEvent, RelayError
-from .nip44 import NIP44Encrypt  # Import NIP-44 encryption
+from .crypto import (
+    blind_message,
+    unblind_signature,
+    hash_to_curve,
+    NIP44Encrypt,
+)  # Import crypto primitives and NIP-44 encryption
 
 import httpx  # shared HTTP client for all Mint objects
 
@@ -99,11 +104,17 @@ class Wallet:
             "wss://relay.damus.io",
             "wss://relay.nostr.band",
             "wss://nos.lol",
+            "wss://nostr.wine",
+            "wss://relay.snort.social",
+            "wss://nostr.mom",
         ]
 
         # Mint and relay instances
         self.mints: dict[str, Mint] = {}
         self.relay_instances: list[NostrRelay] = []
+
+        # Track minted quotes to prevent double-minting
+        self._minted_quotes: set[str] = set()
 
         # Shared HTTP client reused by all Mint objects
         self.mint_client = httpx.AsyncClient()
@@ -112,30 +123,49 @@ class Wallet:
 
     def _create_blinded_message(
         self, amount: int, keyset_id: str
-    ) -> tuple[str, BlindedMessage]:
+    ) -> tuple[str, str, BlindedMessage]:
         """Create a properly blinded message for the mint.
 
         Returns:
-            Tuple of (secret, BlindedMessage)
+            Tuple of (secret, blinding_factor_hex, BlindedMessage)
         """
         # Generate random secret
         secret = secrets.token_hex(32)
 
-        # Derive public key from secret (Y = hash_to_curve(secret))
-        # For simplicity, we'll use the secret as a private key and get its public key
-        # In production Cashu, this uses hash_to_curve which is more complex
-        secret_key = PrivateKey(bytes.fromhex(secret))
-        Y = secret_key.public_key
+        # Blind the message
+        B_, r = blind_message(secret)
 
-        # For now, we'll use the unblinded public key as B_
-        # In production, this should be blinded with a blinding factor
-        B_ = Y.format(compressed=True).hex()
+        # Convert to hex for storage
+        B_hex = B_.format(compressed=True).hex()
+        r_hex = r.hex()
 
-        return secret, BlindedMessage(
-            amount=amount,
-            id=keyset_id,
-            B_=B_,
+        return (
+            secret,
+            r_hex,
+            BlindedMessage(
+                amount=amount,
+                id=keyset_id,
+                B_=B_hex,
+            ),
         )
+
+    def _get_mint_pubkey_for_amount(
+        self, keys_data: dict[str, str], amount: int
+    ) -> PublicKey | None:
+        """Get the mint's public key for a specific amount.
+
+        Args:
+            keys_data: Dictionary mapping amounts to public keys
+            amount: The denomination amount
+
+        Returns:
+            PublicKey or None if not found
+        """
+        # Keys are indexed by string amount
+        pubkey_hex = keys_data.get(str(amount))
+        if pubkey_hex:
+            return PublicKey(bytes.fromhex(pubkey_hex))
+        return None
 
     def _decode_nsec(self, nsec: str) -> PrivateKey:
         """Decode `nsec` (bech32 as per Nostr) or raw hex private key."""
@@ -163,6 +193,15 @@ class Wallet:
 
     def _get_pubkey(self, privkey: PrivateKey | None = None) -> str:
         """Get hex public key from private key (defaults to main nsec)."""
+        if privkey is None:
+            privkey = self._privkey
+        # Nostr uses x-only public keys (32 bytes, without the prefix byte)
+        compressed_pubkey = privkey.public_key.format(compressed=True)
+        x_only_pubkey = compressed_pubkey[1:]  # Remove the prefix byte
+        return x_only_pubkey.hex()
+
+    def _get_pubkey_compressed(self, privkey: PrivateKey | None = None) -> str:
+        """Get full compressed hex public key for encryption (33 bytes)."""
         if privkey is None:
             privkey = self._privkey
         return privkey.public_key.format(compressed=True).hex()
@@ -204,14 +243,14 @@ class Wallet:
     ) -> str:
         """Encrypt content using NIP-44 v2."""
         if recipient_pubkey is None:
-            recipient_pubkey = self._get_pubkey()
+            recipient_pubkey = self._get_pubkey_compressed()
 
         return NIP44Encrypt.encrypt(plaintext, self._privkey, recipient_pubkey)
 
     def _nip44_decrypt(self, ciphertext: str, sender_pubkey: str | None = None) -> str:
         """Decrypt content using NIP-44 v2."""
         if sender_pubkey is None:
-            sender_pubkey = self._get_pubkey()
+            sender_pubkey = self._get_pubkey_compressed()
 
         return NIP44Encrypt.decrypt(ciphertext, self._privkey, sender_pubkey)
 
@@ -244,10 +283,21 @@ class Wallet:
             discovered_relays = await self._discover_relays()
             relay_urls = discovered_relays or self.relays
 
-            for url in relay_urls[:3]:  # Use up to 3 relays
-                relay = NostrRelay(url)
-                await relay.connect()
-                self.relay_instances.append(relay)
+            # Try to connect to relays
+            for url in relay_urls[:5]:  # Try up to 5 relays
+                try:
+                    relay = NostrRelay(url)
+                    await relay.connect()
+                    self.relay_instances.append(relay)
+
+                    # Stop after successfully connecting to 3 relays
+                    if len(self.relay_instances) >= 3:
+                        break
+                except Exception:
+                    continue
+
+            if not self.relay_instances:
+                raise RelayError("Could not connect to any relay")
 
         return self.relay_instances
 
@@ -273,15 +323,23 @@ class Wallet:
 
         # Try to publish to at least one relay
         published = False
+        errors = []
+
         for relay in relays:
             try:
                 if await relay.publish_event(event_dict):
                     published = True
-            except Exception:
+                else:
+                    errors.append(f"{relay.url}: Event rejected")
+            except Exception as e:
+                errors.append(f"{relay.url}: {str(e)}")
                 continue
 
         if not published:
-            raise RelayError("Failed to publish event to any relay")
+            error_msg = "Failed to publish event to any relay. Errors:\n" + "\n".join(
+                errors
+            )
+            raise RelayError(error_msg)
 
         return event["id"]
 
@@ -355,10 +413,16 @@ class Wallet:
 
         # Fetch all wallet-related events
         all_events: list[NostrEvent] = []
+        event_ids_seen: set[str] = set()
+
         for relay in relays:
             try:
                 events = await relay.fetch_wallet_events(pubkey)
-                all_events.extend(events)
+                # Deduplicate events
+                for event in events:
+                    if event["id"] not in event_ids_seen:
+                        all_events.append(event)
+                        event_ids_seen.add(event["id"])
             except Exception:
                 continue
 
@@ -393,8 +457,10 @@ class Wallet:
                     if tag[0] == "e":
                         deleted_ids.add(tag[1])
 
-        # Aggregate unspent proofs
+        # Aggregate unspent proofs and track which event they came from
         all_proofs: list[ProofDict] = []
+        proof_to_event_id: dict[str, str] = {}
+
         for event in token_events:
             if event["id"] in deleted_ids:
                 continue
@@ -403,7 +469,13 @@ class Wallet:
             decrypted = self._nip44_decrypt(event["content"])
             token_data = json.loads(decrypted)
             proofs = token_data.get("proofs", [])
-            all_proofs.extend(proofs)
+
+            # Add proofs and track their event ID
+            for proof in proofs:
+                all_proofs.append(proof)
+                # Create a unique proof ID from its content
+                proof_id = f"{proof['secret']}:{proof['C']}"
+                proof_to_event_id[proof_id] = event["id"]
 
         # Calculate balance
         balance = sum(p["amount"] for p in all_proofs)
@@ -422,6 +494,7 @@ class Wallet:
             balance=balance,
             proofs=all_proofs,
             mint_keysets=mint_keysets,
+            proof_to_event_id=proof_to_event_id,
         )
 
     # ───────────────────────────── Token Events ───────────────────────────────
@@ -433,6 +506,11 @@ class Wallet:
         deleted_token_ids: list[str] | None = None,
     ) -> str:
         """Publish encrypted token event (kind 7375) and return its id."""
+        # First, delete old token events if specified
+        if deleted_token_ids:
+            for token_id in deleted_token_ids:
+                await self.delete_token_event(token_id)
+
         # Assume all proofs are from the same mint (first mint URL)
         mint_url = self.mint_urls[0]
 
@@ -441,9 +519,6 @@ class Wallet:
             "mint": mint_url,
             "proofs": proofs,
         }
-
-        if deleted_token_ids:
-            content_data["del"] = deleted_token_ids
 
         # Encrypt content
         content_json = json.dumps(content_data)
@@ -548,31 +623,59 @@ class Wallet:
         # In production, implement proper blinding
         outputs: list[BlindedMessage] = []
         secrets: list[str] = []
+        blinding_factors: list[str] = []
         total_amount = sum(p["amount"] for p in proofs)
 
         # Simple denomination split
         remaining = total_amount
         for denom in [64, 32, 16, 8, 4, 2, 1]:
             while remaining >= denom:
-                secret, blinded_msg = self._create_blinded_message(
+                secret, r_hex, blinded_msg = self._create_blinded_message(
                     denom, proofs[0]["id"]
                 )
                 outputs.append(blinded_msg)
                 secrets.append(secret)
+                blinding_factors.append(r_hex)
                 remaining -= denom
 
         # Swap proofs for new ones
         response = await mint.swap(inputs=mint_proofs, outputs=outputs)
 
+        # Get mint public key for unblinding
+        keys_resp = await mint.get_keys()
+        # Find the keyset matching our proofs
+        keyset_id = proofs[0]["id"]
+        mint_keys = None
+        for ks in keys_resp.get("keysets", []):
+            if ks["id"] == keyset_id:
+                keys_data = ks.get("keys", {})
+                if isinstance(keys_data, dict) and keys_data:
+                    mint_keys = keys_data
+                    break
+
+        if not mint_keys:
+            raise WalletError("Could not find mint keys")
+
         # Convert signatures to proofs
         new_proofs: list[ProofDict] = []
         for i, sig in enumerate(response["signatures"]):
+            # Get the public key for this amount
+            amount = sig["amount"]
+            mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+            if not mint_pubkey:
+                raise WalletError(f"Could not find mint public key for amount {amount}")
+
+            # Unblind the signature
+            C_ = PublicKey(bytes.fromhex(sig["C_"]))
+            r = bytes.fromhex(blinding_factors[i])
+            C = unblind_signature(C_, r, mint_pubkey)
+
             new_proofs.append(
                 ProofDict(
                     id=sig["id"],
                     amount=sig["amount"],
                     secret=secrets[i],
-                    C=sig["C_"],
+                    C=C.format(compressed=True).hex(),
                 )
             )
 
@@ -624,6 +727,20 @@ class Wallet:
         quote_status = await mint.get_mint_quote(quote_id)
 
         if quote_status.get("paid") and quote_status.get("state") == "PAID":
+            # Check if we've already minted for this quote
+            if quote_id in self._minted_quotes:
+                return dict(quote_status)
+
+            # Mark this quote as being minted
+            self._minted_quotes.add(quote_id)
+
+            # Check if we've already minted for this quote
+            # by seeing if we have a token event with this quote ID in tags
+            state = await self.fetch_wallet_state()
+
+            # TODO: Properly track minted quotes to avoid double-minting
+            # For now, we'll proceed with minting
+
             # Get amount from quote_status or use provided amount
             mint_amount = quote_status.get("amount", amount)
             if mint_amount is None:
@@ -634,6 +751,7 @@ class Wallet:
             # Create blinded messages for the amount
             outputs: list[BlindedMessage] = []
             secrets: list[str] = []  # Keep track of secrets for creating proofs later
+            blinding_factors: list[str] = []  # Track blinding factors
 
             # Get active keyset
             keys_resp = await mint.get_keys()
@@ -644,23 +762,52 @@ class Wallet:
             remaining = mint_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
                     outputs.append(blinded_msg)
                     secrets.append(secret)
+                    blinding_factors.append(r_hex)
                     remaining -= denom
 
             # Mint tokens
             mint_resp = await mint.mint(quote=quote_id, outputs=outputs)
 
+            # Get mint public key for unblinding
+            keys_resp = await mint.get_keys()
+            mint_keys = None
+            for ks in keys_resp.get("keysets", []):
+                if ks["id"] == keyset_id:
+                    keys_data = ks.get("keys", {})
+                    if isinstance(keys_data, dict) and keys_data:
+                        mint_keys = keys_data
+                        break
+
+            if not mint_keys:
+                raise WalletError("Could not find mint keys")
+
             # Convert to proofs
             new_proofs: list[ProofDict] = []
             for i, sig in enumerate(mint_resp["signatures"]):
+                # Get the public key for this amount
+                amount = sig["amount"]
+                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                if not mint_pubkey:
+                    raise WalletError(
+                        f"Could not find mint public key for amount {amount}"
+                    )
+
+                # Unblind the signature
+                C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                r = bytes.fromhex(blinding_factors[i])
+                C = unblind_signature(C_, r, mint_pubkey)
+
                 new_proofs.append(
                     ProofDict(
                         id=sig["id"],
                         amount=sig["amount"],
                         secret=secrets[i],
-                        C=sig["C_"],
+                        C=C.format(compressed=True).hex(),
                     )
                 )
 
@@ -706,7 +853,6 @@ class Wallet:
 
             while (time.time() - start_time) < timeout:
                 quote_status = await self.check_quote_status(quote_id, amount)
-                print(f"Quote status: {quote_status}")
                 if quote_status.get("paid"):
                     return True
 
@@ -764,6 +910,7 @@ class Wallet:
         change_amount = selected_amount - total_needed
         change_outputs: list[BlindedMessage] = []
         change_secrets: list[str] = []
+        change_blinding_factors: list[str] = []
 
         if change_amount > 0:
             # Create blinded messages for change
@@ -772,9 +919,12 @@ class Wallet:
 
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
                     change_outputs.append(blinded_msg)
                     change_secrets.append(secret)
+                    change_blinding_factors.append(r_hex)
                     remaining -= denom
 
         # Execute melt
@@ -783,6 +933,17 @@ class Wallet:
             inputs=mint_proofs,
             outputs=change_outputs if change_outputs else None,
         )
+
+        # Get mint public key for unblinding change
+        keys_resp = await mint.get_keys()
+        mint_keys = None
+        if change_outputs:
+            for ks in keys_resp.get("keysets", []):
+                if ks["id"] == keyset_id:
+                    keys_data = ks.get("keys", {})
+                    if isinstance(keys_data, dict) and keys_data:
+                        mint_keys = keys_data
+                        break
 
         # Delete old token events (find which events contained the spent proofs)
         # For simplicity, assume one event per mint
@@ -793,15 +954,28 @@ class Wallet:
         # maintain this mapping, violating NIP-60 requirements.
 
         # Create new token event for change
-        if melt_resp.get("change"):
+        if melt_resp.get("change") and mint_keys:
             change_proofs: list[ProofDict] = []
             for i, sig in enumerate(melt_resp["change"]):
+                # Get the public key for this amount
+                amount = sig["amount"]
+                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                if not mint_pubkey:
+                    raise WalletError(
+                        f"Could not find mint public key for amount {amount}"
+                    )
+
+                # Unblind the signature
+                C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                r = bytes.fromhex(change_blinding_factors[i])
+                C = unblind_signature(C_, r, mint_pubkey)
+
                 change_proofs.append(
                     ProofDict(
                         id=sig["id"],
                         amount=sig["amount"],
                         secret=change_secrets[i],
-                        C=sig["C_"],
+                        C=C.format(compressed=True).hex(),
                     )
                 )
 
@@ -831,10 +1005,18 @@ class Wallet:
         selected_amount = 0
         remaining_proofs: list[ProofDict] = []
 
+        # Track which events contain selected proofs
+        events_to_delete: set[str] = set()
+        proof_to_event_id = state.proof_to_event_id or {}
+
         for proof in state.proofs:
             if selected_amount < amount:
                 selected_proofs.append(proof)
                 selected_amount += proof["amount"]
+                # Track which event this proof came from
+                proof_id = f"{proof['secret']}:{proof['C']}"
+                if proof_id in proof_to_event_id:
+                    events_to_delete.add(proof_to_event_id[proof_id])
             else:
                 remaining_proofs.append(proof)
 
@@ -855,6 +1037,7 @@ class Wallet:
             # Create outputs for exact amount and change
             outputs: list[BlindedMessage] = []
             all_secrets: list[str] = []
+            all_blinding_factors: list[str] = []
             keyset_id = selected_proofs[0]["id"]
 
             # Outputs for sending
@@ -863,11 +1046,14 @@ class Wallet:
             remaining = amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
                     outputs.append(blinded_msg)
                     send_outputs.append(blinded_msg)
                     all_secrets.append(secret)
                     send_secrets.append(secret)
+                    all_blinding_factors.append(r_hex)
                     remaining -= denom
 
             # Outputs for change
@@ -875,24 +1061,53 @@ class Wallet:
             remaining = change_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
                     outputs.append(blinded_msg)
                     all_secrets.append(secret)
+                    all_blinding_factors.append(r_hex)
                     remaining -= denom
 
             # Swap for exact denominations
             swap_resp = await mint.swap(inputs=mint_proofs, outputs=outputs)
+
+            # Get mint public key for unblinding
+            keys_resp = await mint.get_keys()
+            mint_keys = None
+            for ks in keys_resp.get("keysets", []):
+                if ks["id"] == keyset_id:
+                    keys_data = ks.get("keys", {})
+                    if isinstance(keys_data, dict) and keys_data:
+                        mint_keys = keys_data
+                        break
+
+            if not mint_keys:
+                raise WalletError("Could not find mint keys")
 
             # Separate send and change proofs
             send_proofs: list[ProofDict] = []
             change_proofs: list[ProofDict] = []
 
             for i, sig in enumerate(swap_resp["signatures"]):
+                # Get the public key for this amount
+                amount = sig["amount"]
+                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                if not mint_pubkey:
+                    raise WalletError(
+                        f"Could not find mint public key for amount {amount}"
+                    )
+
+                # Unblind the signature
+                C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                r = bytes.fromhex(all_blinding_factors[i])
+                C = unblind_signature(C_, r, mint_pubkey)
+
                 proof = ProofDict(
                     id=sig["id"],
                     amount=sig["amount"],
                     secret=all_secrets[i],
-                    C=sig["C_"],
+                    C=C.format(compressed=True).hex(),
                 )
 
                 if i < len(send_outputs):
@@ -900,18 +1115,34 @@ class Wallet:
                 else:
                     change_proofs.append(proof)
 
-            # Update remaining proofs
-            remaining_proofs.extend(change_proofs)
+            # Update remaining proofs with change proofs
+            remaining_proofs = change_proofs
             selected_proofs = send_proofs
+
+            # Also need to include any proofs we didn't select initially
+            for proof in state.proofs:
+                proof_id = f"{proof['secret']}:{proof['C']}"
+                if (
+                    proof_id in proof_to_event_id
+                    and proof_to_event_id[proof_id] not in events_to_delete
+                ):
+                    remaining_proofs.append(proof)
 
         # Create Cashu token
         token = self._serialize_proofs_for_token(selected_proofs, self.mint_urls[0])
 
         # Delete old token events and create new one for remaining
+        deleted_event_ids = list(events_to_delete)
+
         if remaining_proofs:
-            token_event_id = await self.publish_token_event(remaining_proofs)
+            token_event_id = await self.publish_token_event(
+                remaining_proofs, deleted_token_ids=deleted_event_ids
+            )
             created_ids = [token_event_id]
         else:
+            # Still need to delete old events even if no remaining proofs
+            for event_id in deleted_event_ids:
+                await self.delete_token_event(event_id)
             created_ids = []
 
         # Publish spending history
@@ -919,6 +1150,7 @@ class Wallet:
             direction="out",
             amount=amount,
             created_token_ids=created_ids,
+            destroyed_token_ids=deleted_event_ids,
         )
 
         return token

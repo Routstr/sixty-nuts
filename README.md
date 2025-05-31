@@ -35,7 +35,7 @@ async def main():
 ## Architecture
 
 - `wallet.py` - Main wallet implementation
-- `nip44.py` - NIP-44 v2 encryption implementation  
+- `crypto.py` - Cryptographic primitives (BDHKE and NIP-44 v2 encryption)
 - `mint.py` - Cashu mint API client
 - `relay.py` - Nostr relay WebSocket client
 
