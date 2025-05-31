@@ -129,19 +129,22 @@ class Wallet:
         Returns:
             Tuple of (secret, blinding_factor_hex, BlindedMessage)
         """
-        # Generate random 32-byte secret and encode using Cashu's base64url format
+        # Generate random 32-byte secret and encode as hex string (64 chars)
         secret_bytes = secrets.token_bytes(32)
-        secret_b64 = base64.urlsafe_b64encode(secret_bytes).decode().rstrip("=")
+        secret_hex = secret_bytes.hex()
 
-        # Blind the message using the raw bytes
-        B_, r = blind_message(secret_bytes)
+        # For hash_to_curve, use UTF-8 encoded bytes of the hex string
+        secret_utf8_bytes = secret_hex.encode("utf-8")
+
+        # Blind the message using the UTF-8 encoded hex string
+        B_, r = blind_message(secret_utf8_bytes)
 
         # Convert to hex for storage
         B_hex = B_.format(compressed=True).hex()
         r_hex = r.hex()
 
         return (
-            secret_b64,
+            secret_hex,  # Store as hex string in proof
             r_hex,
             BlindedMessage(
                 amount=amount,
