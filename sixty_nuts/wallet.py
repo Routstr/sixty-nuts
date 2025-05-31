@@ -129,18 +129,22 @@ class Wallet:
         Returns:
             Tuple of (secret, blinding_factor_hex, BlindedMessage)
         """
-        # Generate random secret
-        secret = secrets.token_hex(32)
+        # Generate random 32-byte secret and encode using Cashu's base64url format
+        secret_bytes = secrets.token_bytes(32)
+        secret_b64 = base64.urlsafe_b64encode(secret_bytes).decode().rstrip("=")
 
-        # Blind the message
-        B_, r = blind_message(secret)
+        # Use hex encoding internally for the curve hash while keeping base64 for the proof
+        secret_hex = secret_bytes.hex()
+
+        # Blind the message using the hex representation expected by blind_message
+        B_, r = blind_message(secret_hex)
 
         # Convert to hex for storage
         B_hex = B_.format(compressed=True).hex()
         r_hex = r.hex()
 
         return (
-            secret,
+            secret_b64,
             r_hex,
             BlindedMessage(
                 amount=amount,
@@ -457,24 +461,40 @@ class Wallet:
                     if tag[0] == "e":
                         deleted_ids.add(tag[1])
 
-        # Aggregate unspent proofs and track which event they came from
+        # Aggregate unspent proofs taking into account NIP-60 roll-overs and avoiding duplicates
         all_proofs: list[ProofDict] = []
         proof_to_event_id: dict[str, str] = {}
 
-        for event in token_events:
-            if event["id"] in deleted_ids:
+        # Index events newest → oldest so that when we encounter a replacement first we can ignore the ones it deletes later
+        token_events_sorted = sorted(
+            token_events, key=lambda e: e["created_at"], reverse=True
+        )
+
+        invalid_token_ids: set[str] = set(deleted_ids)
+        proof_seen: set[str] = set()
+
+        for event in token_events_sorted:
+            if event["id"] in invalid_token_ids:
                 continue
 
-            # Decrypt and parse proofs
             decrypted = self._nip44_decrypt(event["content"])
             token_data = json.loads(decrypted)
+
+            # Mark tokens referenced in the "del" field as superseded
+            for old_id in token_data.get("del", []):
+                invalid_token_ids.add(old_id)
+
+            if event["id"] in invalid_token_ids:
+                continue
+
             proofs = token_data.get("proofs", [])
 
-            # Add proofs and track their event ID
             for proof in proofs:
-                all_proofs.append(proof)
-                # Create a unique proof ID from its content
                 proof_id = f"{proof['secret']}:{proof['C']}"
+                if proof_id in proof_seen:
+                    continue
+                proof_seen.add(proof_id)
+                all_proofs.append(proof)
                 proof_to_event_id[proof_id] = event["id"]
 
         # Calculate balance
@@ -519,6 +539,10 @@ class Wallet:
             "mint": mint_url,
             "proofs": proofs,
         }
+
+        # Add del field if we're replacing old tokens
+        if deleted_token_ids:
+            content_data["del"] = deleted_token_ids
 
         # Encrypt content
         content_json = json.dumps(content_data)
@@ -626,12 +650,18 @@ class Wallet:
         blinding_factors: list[str] = []
         total_amount = sum(p["amount"] for p in proofs)
 
-        # Simple denomination split
+        # Simple denomination split using mint's active keyset id
+        keys_resp_active = await mint.get_keys()
+        keysets_active = keys_resp_active.get("keysets", [])
+        keyset_id_active = (
+            keysets_active[0]["id"] if keysets_active else proofs[0]["id"]
+        )
+
         remaining = total_amount
         for denom in [64, 32, 16, 8, 4, 2, 1]:
             while remaining >= denom:
                 secret, r_hex, blinded_msg = self._create_blinded_message(
-                    denom, proofs[0]["id"]
+                    denom, keyset_id_active
                 )
                 outputs.append(blinded_msg)
                 secrets.append(secret)
@@ -644,11 +674,11 @@ class Wallet:
         # Get mint public key for unblinding
         keys_resp = await mint.get_keys()
         # Find the keyset matching our proofs
-        keyset_id = proofs[0]["id"]
+        keyset_id = keyset_id_active
         mint_keys = None
         for ks in keys_resp.get("keysets", []):
-            if ks["id"] == keyset_id:
-                keys_data = ks.get("keys", {})
+            if ks["id"] == keyset_id_active:
+                keys_data: str | dict[str, str] = ks.get("keys", {})
                 if isinstance(keys_data, dict) and keys_data:
                     mint_keys = keys_data
                     break
@@ -758,12 +788,16 @@ class Wallet:
             keysets = keys_resp.get("keysets", [])
             keyset_id = keysets[0]["id"] if keysets else ""
 
-            # Simple denomination split
+            # Simple denomination split using mint's active keyset id
+            keys_resp_active = await mint.get_keys()
+            keysets_active = keys_resp_active.get("keysets", [])
+            keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
+
             remaining = mint_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
                     secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id
+                        denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     secrets.append(secret)
@@ -777,8 +811,8 @@ class Wallet:
             keys_resp = await mint.get_keys()
             mint_keys = None
             for ks in keys_resp.get("keysets", []):
-                if ks["id"] == keyset_id:
-                    keys_data = ks.get("keys", {})
+                if ks["id"] == keyset_id_active:
+                    keys_data: str | dict[str, str] = ks.get("keys", {})
                     if isinstance(keys_data, dict) and keys_data:
                         mint_keys = keys_data
                         break
@@ -888,13 +922,18 @@ class Wallet:
         # the number of proofs used and optimize privacy
         selected_proofs: list[ProofDict] = []
         selected_amount = 0
-        old_token_ids: list[str] = []
+        events_to_delete: set[str] = set()
+        proof_to_event_id = state.proof_to_event_id or {}
 
         for proof in state.proofs:
             if selected_amount >= total_needed:
                 break
             selected_proofs.append(proof)
             selected_amount += proof["amount"]
+            # Track which event this proof came from
+            proof_id = f"{proof['secret']}:{proof['C']}"
+            if proof_id in proof_to_event_id:
+                events_to_delete.add(proof_to_event_id[proof_id])
 
         if selected_amount < total_needed:
             raise WalletError(
@@ -917,10 +956,15 @@ class Wallet:
             remaining = change_amount
             keyset_id = selected_proofs[0]["id"]
 
+            # Use the mint's currently active keyset for outputs
+            keys_resp_active = await mint.get_keys()
+            keysets_active = keys_resp_active.get("keysets", [])
+            keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
+
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
                     secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id
+                        denom, keyset_id_active
                     )
                     change_outputs.append(blinded_msg)
                     change_secrets.append(secret)
@@ -939,8 +983,8 @@ class Wallet:
         mint_keys = None
         if change_outputs:
             for ks in keys_resp.get("keysets", []):
-                if ks["id"] == keyset_id:
-                    keys_data = ks.get("keys", {})
+                if ks["id"] == keyset_id_active:
+                    keys_data: str | dict[str, str] = ks.get("keys", {})
                     if isinstance(keys_data, dict) and keys_data:
                         mint_keys = keys_data
                         break
@@ -952,6 +996,8 @@ class Wallet:
         # TODO: This is incorrect - need to track which proofs belong to which
         # token events to properly delete them. Current implementation doesn't
         # maintain this mapping, violating NIP-60 requirements.
+
+        old_token_ids = list(events_to_delete)
 
         # Create new token event for change
         if melt_resp.get("change") and mint_keys:
@@ -1040,6 +1086,11 @@ class Wallet:
             all_blinding_factors: list[str] = []
             keyset_id = selected_proofs[0]["id"]
 
+            # Use the mint's currently active keyset for outputs
+            keys_resp_active = await mint.get_keys()
+            keysets_active = keys_resp_active.get("keysets", [])
+            keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
+
             # Outputs for sending
             send_outputs: list[BlindedMessage] = []
             send_secrets: list[str] = []
@@ -1047,7 +1098,7 @@ class Wallet:
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
                     secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id
+                        denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     send_outputs.append(blinded_msg)
@@ -1062,7 +1113,7 @@ class Wallet:
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
                     secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id
+                        denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     all_secrets.append(secret)
@@ -1076,8 +1127,8 @@ class Wallet:
             keys_resp = await mint.get_keys()
             mint_keys = None
             for ks in keys_resp.get("keysets", []):
-                if ks["id"] == keyset_id:
-                    keys_data = ks.get("keys", {})
+                if ks["id"] == keyset_id_active:
+                    keys_data: str | dict[str, str] = ks.get("keys", {})
                     if isinstance(keys_data, dict) and keys_data:
                         mint_keys = keys_data
                         break

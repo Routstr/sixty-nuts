@@ -29,36 +29,41 @@ class BlindedMessage:
 def hash_to_curve(message: bytes) -> PublicKey:
     """Hash a message to a point on the secp256k1 curve.
 
-    This is a simplified version that works by:
-    1. Hashing the message to get a scalar
-    2. Using that scalar as a private key to get a public key point
-
-    Note: This is not the full hash-to-curve from the IETF draft,
-    but it's compatible with most Cashu implementations.
+    Implements the Cashu hash_to_curve algorithm:
+    Y = PublicKey('02' || SHA256(msg_hash || counter))
+    where msg_hash = SHA256(DOMAIN_SEPARATOR || message)
     """
-    # Hash the message to get a 32-byte value
-    msg_hash = hashlib.sha256(message).digest()
+    # Domain separator as per Cashu spec
+    DOMAIN_SEPARATOR = b"Secp256k1_HashToCurve_Cashu_"
 
-    # Iterate to find a valid private key
-    # (in rare cases the hash might be >= the curve order)
+    # First hash: SHA256(DOMAIN_SEPARATOR || message)
+    msg_hash = hashlib.sha256(DOMAIN_SEPARATOR + message).digest()
+
+    # Try to find a valid point by incrementing counter
     counter = 0
-    while True:
-        try:
-            if counter == 0:
-                key_bytes = msg_hash
-            else:
-                key_bytes = hashlib.sha256(
-                    msg_hash + counter.to_bytes(4, "big")
-                ).digest()
+    while counter < 2**32:
+        # SHA256(msg_hash || counter)
+        counter_bytes = counter.to_bytes(4, byteorder="little")
+        hash_input = msg_hash + counter_bytes
+        hash_output = hashlib.sha256(hash_input).digest()
 
-            # Try to create a private key
-            privkey = PrivateKey(key_bytes)
-            # Return the corresponding public key point
-            return privkey.public_key
+        # Try to create a compressed public key with '02' prefix
+        try:
+            pubkey_bytes = b"\x02" + hash_output
+            pubkey = PublicKey(pubkey_bytes)
+            return pubkey
         except Exception:
-            counter += 1
-            if counter > 1000:
-                raise ValueError("Failed to find valid curve point")
+            # If not valid, try with '03' prefix
+            try:
+                pubkey_bytes = b"\x03" + hash_output
+                pubkey = PublicKey(pubkey_bytes)
+                return pubkey
+            except Exception:
+                pass
+
+        counter += 1
+
+    raise ValueError("Could not find valid curve point after 2^32 iterations")
 
 
 def blind_message(secret: str, r: bytes | None = None) -> tuple[PublicKey, bytes]:
