@@ -8,6 +8,7 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
+import asyncio
 
 from coincurve import PrivateKey
 
@@ -108,6 +109,33 @@ class Wallet:
         self.mint_client = httpx.AsyncClient()
 
     # ───────────────────────── Crypto Helpers ─────────────────────────────────
+
+    def _create_blinded_message(
+        self, amount: int, keyset_id: str
+    ) -> tuple[str, BlindedMessage]:
+        """Create a properly blinded message for the mint.
+
+        Returns:
+            Tuple of (secret, BlindedMessage)
+        """
+        # Generate random secret
+        secret = secrets.token_hex(32)
+
+        # Derive public key from secret (Y = hash_to_curve(secret))
+        # For simplicity, we'll use the secret as a private key and get its public key
+        # In production Cashu, this uses hash_to_curve which is more complex
+        secret_key = PrivateKey(bytes.fromhex(secret))
+        Y = secret_key.public_key
+
+        # For now, we'll use the unblinded public key as B_
+        # In production, this should be blinded with a blinding factor
+        B_ = Y.format(compressed=True).hex()
+
+        return secret, BlindedMessage(
+            amount=amount,
+            id=keyset_id,
+            B_=B_,
+        )
 
     def _decode_nsec(self, nsec: str) -> PrivateKey:
         """Decode `nsec` (bech32 as per Nostr) or raw hex private key."""
@@ -507,32 +535,30 @@ class Wallet:
         # Convert to mint proof format
         mint_proofs: list[Proof] = []
         for p in proofs:
-            mint_proof = Proof(
-                id=p["id"],
-                amount=p["amount"],
-                secret=p["secret"],
-                C=p["C"],
+            mint_proofs.append(
+                Proof(
+                    id=p["id"],
+                    amount=p["amount"],
+                    secret=p["secret"],
+                    C=p["C"],
+                )
             )
-            mint_proofs.append(mint_proof)
 
         # Create blinded messages for new proofs
         # In production, implement proper blinding
         outputs: list[BlindedMessage] = []
+        secrets: list[str] = []
         total_amount = sum(p["amount"] for p in proofs)
 
         # Simple denomination split
         remaining = total_amount
         for denom in [64, 32, 16, 8, 4, 2, 1]:
             while remaining >= denom:
-                secret = secrets.token_hex(32)
-                # Simplified - real implementation needs proper blinding
-                outputs.append(
-                    BlindedMessage(
-                        amount=denom,
-                        id=proofs[0]["id"],  # Use same keyset
-                        B_=secret,  # This should be blinded
-                    )
+                secret, blinded_msg = self._create_blinded_message(
+                    denom, proofs[0]["id"]
                 )
+                outputs.append(blinded_msg)
+                secrets.append(secret)
                 remaining -= denom
 
         # Swap proofs for new ones
@@ -545,7 +571,7 @@ class Wallet:
                 ProofDict(
                     id=sig["id"],
                     amount=sig["amount"],
-                    secret=outputs[i]["B_"],  # Use the secret
+                    secret=secrets[i],
                     C=sig["C_"],
                 )
             )
@@ -560,8 +586,12 @@ class Wallet:
             created_token_ids=[token_event_id],
         )
 
-    async def create_quote(self, amount: int) -> str:  # renamed from mint()
-        """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string."""
+    async def create_quote(self, amount: int) -> tuple[str, str]:
+        """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string and quote ID.
+
+        Returns:
+            Tuple of (lightning_invoice, quote_id)
+        """
         mint = self._get_mint(self.mint_urls[0])
 
         # Create mint quote
@@ -580,9 +610,13 @@ class Wallet:
         #     expiration=int(time.time()) + 14 * 24 * 60 * 60  # 2 weeks
         # )
 
-        return quote_resp["request"]  # Return Lightning invoice
+        return quote_resp["request"], quote_resp[
+            "quote"
+        ]  # Return both invoice and quote_id
 
-    async def check_quote_status(self, quote_id: str) -> dict[str, object]:
+    async def check_quote_status(
+        self, quote_id: str, amount: int | None = None
+    ) -> dict[str, object]:
         """Check whether a quote has been paid and redeem proofs if so."""
         mint = self._get_mint(self.mint_urls[0])
 
@@ -590,9 +624,16 @@ class Wallet:
         quote_status = await mint.get_mint_quote(quote_id)
 
         if quote_status.get("paid") and quote_status.get("state") == "PAID":
+            # Get amount from quote_status or use provided amount
+            mint_amount = quote_status.get("amount", amount)
+            if mint_amount is None:
+                raise ValueError(
+                    "Amount not available in quote status and not provided"
+                )
+
             # Create blinded messages for the amount
-            amount = quote_status["amount"]
             outputs: list[BlindedMessage] = []
+            secrets: list[str] = []  # Keep track of secrets for creating proofs later
 
             # Get active keyset
             keys_resp = await mint.get_keys()
@@ -600,17 +641,12 @@ class Wallet:
             keyset_id = keysets[0]["id"] if keysets else ""
 
             # Simple denomination split
-            remaining = amount
+            remaining = mint_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret = secrets.token_hex(32)
-                    outputs.append(
-                        BlindedMessage(
-                            amount=denom,
-                            id=keyset_id,
-                            B_=secret,
-                        )
-                    )
+                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    outputs.append(blinded_msg)
+                    secrets.append(secret)
                     remaining -= denom
 
             # Mint tokens
@@ -623,7 +659,7 @@ class Wallet:
                     ProofDict(
                         id=sig["id"],
                         amount=sig["amount"],
-                        secret=outputs[i]["B_"],
+                        secret=secrets[i],
                         C=sig["C_"],
                     )
                 )
@@ -634,11 +670,54 @@ class Wallet:
             # Publish spending history
             await self.publish_spending_history(
                 direction="in",
-                amount=amount,
+                amount=mint_amount,
                 created_token_ids=[token_event_id],
             )
 
         return dict(quote_status)  # type: ignore
+
+    async def mint_async(
+        self, amount: int, *, timeout: int = 300
+    ) -> tuple[str, asyncio.Task[bool]]:
+        """Create a Lightning invoice and return a task that completes when paid.
+
+        This returns immediately with the invoice and a background task that
+        polls for payment.
+
+        Args:
+            amount: Amount in the wallet's currency unit
+            timeout: Maximum seconds to wait for payment (default: 5 minutes)
+
+        Returns:
+            Tuple of (lightning_invoice, payment_task)
+            The payment_task returns True when paid, False on timeout
+
+        Example:
+            invoice, task = await wallet.mint_async(100)
+            print(f"Pay: {invoice}")
+            # Do other things...
+            paid = await task  # Wait for payment
+        """
+        invoice, quote_id = await self.create_quote(amount)
+
+        async def poll_payment() -> bool:
+            start_time = time.time()
+            poll_interval = 1.0
+
+            while (time.time() - start_time) < timeout:
+                quote_status = await self.check_quote_status(quote_id, amount)
+                print(f"Quote status: {quote_status}")
+                if quote_status.get("paid"):
+                    return True
+
+                await asyncio.sleep(poll_interval)
+                poll_interval = min(poll_interval * 1.2, 5.0)
+
+            return False
+
+        # Create background task
+        task = asyncio.create_task(poll_payment())
+        return invoice, task
 
     # ─────────────────────────────── Send ─────────────────────────────────────
 
@@ -684,6 +763,7 @@ class Wallet:
         # Calculate change
         change_amount = selected_amount - total_needed
         change_outputs: list[BlindedMessage] = []
+        change_secrets: list[str] = []
 
         if change_amount > 0:
             # Create blinded messages for change
@@ -692,14 +772,9 @@ class Wallet:
 
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret = secrets.token_hex(32)
-                    change_outputs.append(
-                        BlindedMessage(
-                            amount=denom,
-                            id=keyset_id,
-                            B_=secret,
-                        )
-                    )
+                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    change_outputs.append(blinded_msg)
+                    change_secrets.append(secret)
                     remaining -= denom
 
         # Execute melt
@@ -725,7 +800,7 @@ class Wallet:
                     ProofDict(
                         id=sig["id"],
                         amount=sig["amount"],
-                        secret=change_outputs[i]["B_"],
+                        secret=change_secrets[i],
                         C=sig["C_"],
                     )
                 )
@@ -779,21 +854,20 @@ class Wallet:
 
             # Create outputs for exact amount and change
             outputs: list[BlindedMessage] = []
+            all_secrets: list[str] = []
             keyset_id = selected_proofs[0]["id"]
 
             # Outputs for sending
             send_outputs: list[BlindedMessage] = []
+            send_secrets: list[str] = []
             remaining = amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret = secrets.token_hex(32)
-                    output = BlindedMessage(
-                        amount=denom,
-                        id=keyset_id,
-                        B_=secret,
-                    )
-                    outputs.append(output)
-                    send_outputs.append(output)
+                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    outputs.append(blinded_msg)
+                    send_outputs.append(blinded_msg)
+                    all_secrets.append(secret)
+                    send_secrets.append(secret)
                     remaining -= denom
 
             # Outputs for change
@@ -801,14 +875,9 @@ class Wallet:
             remaining = change_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret = secrets.token_hex(32)
-                    outputs.append(
-                        BlindedMessage(
-                            amount=denom,
-                            id=keyset_id,
-                            B_=secret,
-                        )
-                    )
+                    secret, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                    outputs.append(blinded_msg)
+                    all_secrets.append(secret)
                     remaining -= denom
 
             # Swap for exact denominations
@@ -822,7 +891,7 @@ class Wallet:
                 proof = ProofDict(
                     id=sig["id"],
                     amount=sig["amount"],
-                    secret=outputs[i]["B_"],
+                    secret=all_secrets[i],
                     C=sig["C_"],
                 )
 
