@@ -27,6 +27,11 @@ except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
     bech32_decode = None  # type: ignore
     convertbits = None  # type: ignore
 
+try:
+    import cbor2
+except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
+    cbor2 = None  # type: ignore
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Protocol-level definitions
@@ -363,17 +368,54 @@ class Wallet:
         if not token.startswith("cashu"):
             raise ValueError("Invalid token format")
 
-        # Remove prefix and decode
-        encoded = token[6:]  # Remove "cashuA"
-        # Add correct padding – (-len) % 4 equals 0,1,2,3
-        encoded += "=" * ((-len(encoded)) % 4)
+        # Check token version
+        if token.startswith("cashuA"):
+            # Version 3 - JSON format
+            encoded = token[6:]  # Remove "cashuA"
+            # Add correct padding – (-len) % 4 equals 0,1,2,3
+            encoded += "=" * ((-len(encoded)) % 4)
 
-        decoded = base64.urlsafe_b64decode(encoded).decode()
-        token_data = json.loads(decoded)
+            decoded = base64.urlsafe_b64decode(encoded).decode()
+            token_data = json.loads(decoded)
 
-        # Extract mint and proofs
-        mint_info = token_data["token"][0]
-        return mint_info["mint"], mint_info["proofs"]
+            # Extract mint and proofs from JSON format
+            mint_info = token_data["token"][0]
+            return mint_info["mint"], mint_info["proofs"]
+
+        elif token.startswith("cashuB"):
+            # Version 4 - CBOR format
+            if cbor2 is None:
+                raise ImportError("cbor2 library required for cashuB tokens")
+
+            encoded = token[6:]  # Remove "cashuB"
+            # Add padding for base64
+            encoded += "=" * ((-len(encoded)) % 4)
+
+            decoded_bytes = base64.urlsafe_b64decode(encoded)
+            token_data = cbor2.loads(decoded_bytes)
+
+            # Extract from CBOR format - different structure
+            # 'm' = mint URL, 'u' = unit, 't' = tokens array
+            mint_url = token_data["m"]
+            proofs = []
+
+            # Each token in 't' has 'i' (keyset id) and 'p' (proofs)
+            for token_entry in token_data["t"]:
+                keyset_id = token_entry["i"].hex()  # Convert bytes to hex
+                for proof in token_entry["p"]:
+                    # Convert CBOR proof format to our ProofDict format
+                    proofs.append(
+                        ProofDict(
+                            id=keyset_id,
+                            amount=proof["a"],
+                            secret=proof["s"],
+                            C=proof["c"].hex(),  # Convert bytes to hex
+                        )
+                    )
+
+            return mint_url, proofs
+        else:
+            raise ValueError(f"Unknown token version: {token[:7]}")
 
     # ───────────────────────── Wallet State Management ─────────────────────────
 

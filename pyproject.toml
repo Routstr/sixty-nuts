@@ -10,6 +10,7 @@ dependencies = [
     "bech32>=1.2.0",
     "coincurve>=21.0.0",
     "cryptography>=45.0.3",
+    "cbor2>=5.6.5",
 ]
 
 [dependency-groups]
