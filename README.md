@@ -44,6 +44,50 @@ async def main():
 asyncio.run(main())
 ```
 
+### Temporary Wallets (No NSEC Required)
+
+If you need a wallet with ephemeral keys that are not stored anywhere, use `TempWallet`:
+
+```python
+import asyncio
+from sixty_nuts import TempWallet
+
+async def main():
+    # Create a temporary wallet with auto-generated keys
+    # No NSEC required - keys are generated randomly
+    async with TempWallet(
+        mint_urls=["https://mint.minibits.cash/Bitcoin"],
+        currency="sat"
+    ) as wallet:
+        # Use the wallet normally
+        state = await wallet.fetch_wallet_state()
+        print(f"Balance: {state.balance} sats")
+        
+        # The private key is not stored anywhere
+        # When the wallet is closed, the keys are lost forever
+    
+    # Alternative creation methods:
+    temp_wallet = TempWallet()  # Uses default mint
+    
+    # Or with async factory
+    temp_wallet2 = await TempWallet.create(
+        mint_urls=["https://mint.minibits.cash/Bitcoin"],
+        auto_init=False  # Skip relay connections
+    )
+    
+    await temp_wallet.aclose()
+    await temp_wallet2.aclose()
+
+asyncio.run(main())
+```
+
+**Note**: TempWallet is useful for:
+
+- One-time operations where you don't need to persist the wallet
+- Testing and development
+- Privacy-focused applications where keys should be ephemeral
+- Scenarios where you want to receive/send tokens without storing keys
+
 ### Minting Tokens (Receiving via Lightning)
 
 ```python

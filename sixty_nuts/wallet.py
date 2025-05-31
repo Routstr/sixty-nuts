@@ -664,7 +664,7 @@ class Wallet:
 
     # ─────────────────────────────── Receive ──────────────────────────────────
 
-    async def redeem(self, token: str) -> None:
+    async def redeem(self, token: str) -> int:
         """Redeem a Cashu token into the wallet balance."""
         # Parse token
         mint_url, proofs = self._parse_cashu_token(token)
@@ -756,6 +756,8 @@ class Wallet:
             amount=total_amount,
             created_token_ids=[token_event_id],
         )
+
+        return total_amount
 
     async def create_quote(self, amount: int) -> tuple[str, str]:
         """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string and quote ID.
@@ -1270,7 +1272,7 @@ class Wallet:
             paid = await wallet.send_to_lnurl("user@getalby.com", 1000)
             print(f"Paid {paid} sats")
         """
-        from .lnurl import get_lnurl_data, get_lnurl_invoice, LNURLError
+        from .lnurl import get_lnurl_data, get_lnurl_invoice
 
         # Get LNURL data
         lnurl_data = await get_lnurl_data(lnurl)
@@ -1518,5 +1520,9 @@ class TempWallet(Wallet):
         return wallet
 
 
-if __name__ == "__main__":
-    ...
+async def redeem_to_lnurl(token: str, lnurl: str) -> int:
+    """Redeem a token to an LNURL address and return the amount redeemed."""
+    async with TempWallet() as wallet:
+        amount = await wallet.redeem(token)
+        await wallet.send_to_lnurl(lnurl, amount)
+        return amount

@@ -3,6 +3,10 @@
 Lightweight stateless Cashu wallet implementing NIP-60.
 """
 
-from .wallet import Wallet, TempWallet
+from .wallet import Wallet, TempWallet, redeem_to_lnurl
 
-__all__ = ["Wallet", "TempWallet"]
+__all__ = [
+    "Wallet",
+    "TempWallet",
+    "redeem_to_lnurl",
+]
