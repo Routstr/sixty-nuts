@@ -1,5 +1,4 @@
 import asyncio
-import os
 import secrets
 from pathlib import Path
 
@@ -36,7 +35,7 @@ async def test_wallet_token_cycle():
 
         try:
             # Redeem the token
-            print(f"Redeeming token from .cashu file...")
+            print("Redeeming token from .cashu file...")
             await wallet.redeem(token)
 
             # Longer delay to avoid rate limiting
@@ -71,7 +70,7 @@ async def test_wallet_token_cycle():
 
             # Save the new token back to the file
             token_file.write_text(new_token)
-            print(f"Saved new token to .cashu file")
+            print("Saved new token to .cashu file")
 
             return redeemed_amount
 
