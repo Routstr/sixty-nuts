@@ -2,7 +2,8 @@
 """Test NIP-44 encryption implementation."""
 
 from coincurve import PrivateKey
-from sixty_nuts.nip44 import NIP44Encrypt
+
+from sixty_nuts.crypto import NIP44Encrypt
 
 
 def test_nip44_encryption():

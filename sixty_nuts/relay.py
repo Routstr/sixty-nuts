@@ -62,23 +62,36 @@ class NostrRelay:
 
     async def connect(self) -> None:
         """Connect to the relay."""
-        if self.ws is None or self.ws.closed:
-            self.ws = await websockets.connect(self.url)
+        import asyncio
+
+        if self.ws is None or self.ws.close_code is not None:
+            try:
+                # Add connection timeout
+                async with asyncio.timeout(5.0):
+                    self.ws = await websockets.connect(
+                        self.url, ping_interval=20, ping_timeout=10, close_timeout=10
+                    )
+            except asyncio.TimeoutError:
+                print(f"Timeout connecting to relay: {self.url}")
+                raise RelayError(f"Connection timeout: {self.url}")
+            except Exception as e:
+                print(f"Failed to connect to relay {self.url}: {e}")
+                raise RelayError(f"Connection failed: {e}")
 
     async def disconnect(self) -> None:
         """Disconnect from the relay."""
-        if self.ws and not self.ws.closed:
+        if self.ws and self.ws.close_code is None:
             await self.ws.close()
 
     async def _send(self, message: list[Any]) -> None:
         """Send a message to the relay."""
-        if not self.ws or self.ws.closed:
+        if not self.ws or self.ws.close_code is not None:
             raise RelayError("Not connected to relay")
         await self.ws.send(json.dumps(message))
 
     async def _recv(self) -> list[Any]:
         """Receive a message from the relay."""
-        if not self.ws or self.ws.closed:
+        if not self.ws or self.ws.close_code is not None:
             raise RelayError("Not connected to relay")
         data = await self.ws.recv()
         return json.loads(data)
@@ -90,16 +103,32 @@ class NostrRelay:
 
         Returns True if accepted, False if rejected.
         """
-        await self.connect()
+        import asyncio
 
-        # Send EVENT command
-        await self._send(["EVENT", event])
+        try:
+            await self.connect()
 
-        # Wait for OK response
-        while True:
-            msg = await self._recv()
-            if msg[0] == "OK" and msg[1] == event["id"]:
-                return msg[2]  # True if accepted
+            # Send EVENT command
+            await self._send(["EVENT", event])
+
+            # Wait for OK response with timeout
+            async with asyncio.timeout(10.0):  # 10 second timeout
+                while True:
+                    msg = await self._recv()
+                    if msg[0] == "OK" and msg[1] == event["id"]:
+                        if not msg[2]:  # Event was rejected
+                            if len(msg) > 3:
+                                print(f"Relay rejected event: {msg[3]}")
+                        return msg[2]  # True if accepted
+                    elif msg[0] == "NOTICE":
+                        print(f"Relay notice: {msg[1]}")
+
+        except asyncio.TimeoutError:
+            print(f"Timeout waiting for OK response from {self.url}")
+            return False
+        except Exception as e:
+            print(f"Error publishing to {self.url}: {e}")
+            return False
 
     # ───────────────────────── Fetching Events ─────────────────────────────────
 
@@ -193,7 +222,7 @@ class NostrRelay:
 
         Run this in a background task to handle subscriptions.
         """
-        while self.ws and not self.ws.closed:
+        while self.ws and self.ws.close_code is None:
             try:
                 msg = await self._recv()
 
