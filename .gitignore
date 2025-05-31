@@ -11,3 +11,4 @@ wheels/
 
 # testing
 .cashu
+.pypirc
