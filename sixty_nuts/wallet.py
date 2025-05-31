@@ -1417,5 +1417,106 @@ class Wallet:
         return wallet
 
 
+class TempWallet(Wallet):
+    """Temporary wallet that generates a new random private key without storing it.
+
+    This wallet creates a new random Nostr private key on initialization and
+    operates entirely in memory. The private key is not stored or persisted
+    anywhere, making it suitable for ephemeral operations.
+    """
+
+    def __init__(
+        self,
+        *,
+        mint_urls: list[str] | None = None,
+        currency: Literal["sat", "msat", "usd"] = "sat",
+        wallet_privkey: str | None = None,
+        relays: list[str] | None = None,
+    ) -> None:
+        """Initialize temporary wallet with a new random private key.
+
+        Args:
+            mint_urls: Cashu mint URLs (defaults to minibits mint)
+            currency: Currency unit (sat, msat, or usd)
+            wallet_privkey: Private key for P2PK operations (generated if not provided)
+            relays: Nostr relay URLs to use
+        """
+        # Generate a new random private key
+        temp_privkey = PrivateKey()
+        temp_nsec = self._encode_nsec(temp_privkey)
+
+        # Initialize parent with generated nsec
+        super().__init__(
+            nsec=temp_nsec,
+            mint_urls=mint_urls,
+            currency=currency,
+            wallet_privkey=wallet_privkey,
+            relays=relays,
+        )
+
+    def _encode_nsec(self, privkey: PrivateKey) -> str:
+        """Encode private key as nsec (bech32) format.
+
+        Args:
+            privkey: The private key to encode
+
+        Returns:
+            nsec-encoded private key string
+        """
+        # Try to use bech32 encoding if available
+        if bech32_decode is not None and convertbits is not None:
+            from bech32 import bech32_encode  # type: ignore
+
+            # Convert private key bytes to 5-bit groups for bech32
+            key_bytes = privkey.secret
+            converted = convertbits(key_bytes, 8, 5, pad=True)
+            if converted is not None:
+                encoded = bech32_encode("nsec", converted)
+                if encoded:
+                    return encoded
+
+        # Fallback to hex encoding with nsec prefix
+        return f"nsec_{privkey.to_hex()}"
+
+    @classmethod
+    async def create(  # type: ignore[override]
+        cls,
+        *,
+        mint_urls: list[str] | None = None,
+        currency: Literal["sat", "msat", "usd"] = "sat",
+        wallet_privkey: str | None = None,
+        relays: list[str] | None = None,
+        auto_init: bool = True,
+    ) -> "TempWallet":
+        """Create and optionally initialize a temporary wallet.
+
+        Args:
+            mint_urls: Cashu mint URLs
+            currency: Currency unit
+            wallet_privkey: Private key for P2PK operations
+            relays: Nostr relay URLs
+            auto_init: If True, create wallet event and fetch state
+
+        Returns:
+            Initialized temporary wallet instance
+        """
+        wallet = cls(
+            mint_urls=mint_urls,
+            currency=currency,
+            wallet_privkey=wallet_privkey,
+            relays=relays,
+        )
+
+        if auto_init:
+            try:
+                # Try to fetch existing state first
+                await wallet.fetch_wallet_state()
+            except Exception:
+                # If no wallet exists, create one
+                await wallet.create_wallet_event()
+
+        return wallet
+
+
 if __name__ == "__main__":
     ...
