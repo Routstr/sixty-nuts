@@ -2,15 +2,8 @@
 
 import pytest
 from unittest.mock import AsyncMock, patch
-import httpx
 
-from sixty_nuts.lnurl import (
-    decode_lnurl,
-    get_lnurl_data,
-    get_lnurl_invoice,
-    LNURLError,
-    LNURLData,
-)
+from sixty_nuts.lnurl import decode_lnurl, get_lnurl_data, get_lnurl_invoice, LNURLError
 
 
 class TestDecodeLNURL:
