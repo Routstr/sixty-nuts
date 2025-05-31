@@ -4,6 +4,29 @@ version = "0.0.1"
 description = "Sixty Nuts - NIP-60 Cashu Wallet Implementation"
 readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "shroominic", email = "contact@shroominic.com" }]
+keywords = [
+    "cashu",
+    "ecash",
+    "nostr",
+    "nip-60",
+    "bitcoin",
+    "lightning",
+    "wallet",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Office/Business :: Financial",
+]
 dependencies = [
     "httpx>=0.28.1",
     "websockets>=15.0.1",
@@ -24,3 +47,7 @@ python_functions = ["test_*"]
 asyncio_mode = "auto"
 pythonpath = ["."]
 markers = ["asyncio: mark test as async"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
