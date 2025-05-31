@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 import asyncio
 
+import httpx
 from coincurve import PrivateKey, PublicKey
 
 from .mint import Mint, Proof, BlindedMessage
@@ -17,13 +18,9 @@ from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
     blind_message,
     unblind_signature,
-    hash_to_curve,
     NIP44Encrypt,
-)  # Import crypto primitives and NIP-44 encryption
+)
 
-import httpx  # shared HTTP client for all Mint objects
-
-# Attempt optional bech32 decoding support for nsec keys
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
@@ -61,9 +58,9 @@ class WalletState:
     balance: int
     proofs: list[ProofDict]
     mint_keysets: dict[str, list[dict[str, str]]]  # mint_url -> keysets
-    proof_to_event_id: dict[
-        str, str
-    ] | None = None  # proof_id -> event_id mapping (TODO)
+    proof_to_event_id: dict[str, str] | None = (
+        None  # proof_id -> event_id mapping (TODO)
+    )
 
 
 Direction = Literal["in", "out"]
@@ -674,7 +671,6 @@ class Wallet:
         # Get mint public key for unblinding
         keys_resp = await mint.get_keys()
         # Find the keyset matching our proofs
-        keyset_id = keyset_id_active
         mint_keys = None
         for ks in keys_resp.get("keysets", []):
             if ks["id"] == keyset_id_active:
@@ -766,8 +762,6 @@ class Wallet:
 
             # Check if we've already minted for this quote
             # by seeing if we have a token event with this quote ID in tags
-            state = await self.fetch_wallet_state()
-
             # TODO: Properly track minted quotes to avoid double-minting
             # For now, we'll proceed with minting
 

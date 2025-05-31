@@ -145,7 +145,7 @@ def verify_signature(secret: bytes, C: PublicKey, K: PublicKey) -> bool:
         True if signature is valid
     """
     # Hash secret to curve point Y
-    Y = hash_to_curve(secret)
+    # Y = hash_to_curve(secret)
 
     # For verification, we need the mint's private key k
     # But we can't do this client-side - this would be done by the mint

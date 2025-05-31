@@ -210,7 +210,7 @@ class TestNostrRelay:
         mock_websocket.recv.return_value = json.dumps(["EOSE", "sub_id"])
 
         pubkey = "test_pubkey"
-        events = await relay.fetch_wallet_events(pubkey)
+        await relay.fetch_wallet_events(pubkey)
 
         # Check the filter was correct
         sent_data = mock_websocket.send.call_args_list[0][0][0]
