@@ -133,11 +133,8 @@ class Wallet:
         secret_bytes = secrets.token_bytes(32)
         secret_b64 = base64.urlsafe_b64encode(secret_bytes).decode().rstrip("=")
 
-        # Use hex encoding internally for the curve hash while keeping base64 for the proof
-        secret_hex = secret_bytes.hex()
-
-        # Blind the message using the hex representation expected by blind_message
-        B_, r = blind_message(secret_hex)
+        # Blind the message using the raw bytes
+        B_, r = blind_message(secret_bytes)
 
         # Convert to hex for storage
         B_hex = B_.format(compressed=True).hex()

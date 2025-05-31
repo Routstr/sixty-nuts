@@ -66,19 +66,18 @@ def hash_to_curve(message: bytes) -> PublicKey:
     raise ValueError("Could not find valid curve point after 2^32 iterations")
 
 
-def blind_message(secret: str, r: bytes | None = None) -> tuple[PublicKey, bytes]:
+def blind_message(secret: bytes, r: bytes | None = None) -> tuple[PublicKey, bytes]:
     """Blind a message for the mint.
 
     Args:
-        secret: The secret message to blind (hex string)
+        secret: The secret message to blind (raw bytes)
         r: Optional blinding factor (will be generated if not provided)
 
     Returns:
         Tuple of (blinded_point, blinding_factor)
     """
     # Hash secret to curve point Y
-    # For Cashu, secrets are hex strings that should be decoded to bytes
-    Y = hash_to_curve(bytes.fromhex(secret))
+    Y = hash_to_curve(secret)
 
     # Generate random blinding factor if not provided
     if r is None:
@@ -134,11 +133,11 @@ def unblind_signature(C_: PublicKey, r: bytes, K: PublicKey) -> PublicKey:
     return C
 
 
-def verify_signature(secret: str, C: PublicKey, K: PublicKey) -> bool:
+def verify_signature(secret: bytes, C: PublicKey, K: PublicKey) -> bool:
     """Verify a signature is valid.
 
     Args:
-        secret: The secret message (hex string)
+        secret: The secret message (raw bytes)
         C: The unblinded signature
         K: Mint's public key
 
@@ -146,7 +145,7 @@ def verify_signature(secret: str, C: PublicKey, K: PublicKey) -> bool:
         True if signature is valid
     """
     # Hash secret to curve point Y
-    Y = hash_to_curve(bytes.fromhex(secret))
+    Y = hash_to_curve(secret)
 
     # For verification, we need the mint's private key k
     # But we can't do this client-side - this would be done by the mint
