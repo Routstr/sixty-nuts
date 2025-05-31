@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest-asyncio>=1.0.0"]
+dev = ["mypy>=1.16.0", "pytest-asyncio>=1.0.0", "ruff>=0.11.12"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
