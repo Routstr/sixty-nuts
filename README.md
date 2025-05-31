@@ -9,6 +9,7 @@ A lightweight, stateless Cashu wallet implementation following [NIP-60](https://
 - **Stateless Design**: Wallet state stored on Nostr relays
 - **Multi-Mint Support**: Can work with multiple Cashu mints
 - **Async/Await**: Modern Python async implementation
+- **LNURL Support**: Send to Lightning Addresses and other LNURL formats
 
 ## Installation
 
@@ -144,6 +145,34 @@ async def check_wallet(wallet: Wallet):
         print(f"  {amount} sat: {count} proof(s)")
 ```
 
+### Sending to Lightning Addresses (LNURL)
+
+```python
+async def send_to_lightning_address(wallet: Wallet):
+    # Send to a Lightning Address (user@domain.com format)
+    lnurl = "satoshi@bitcoin.org"
+    amount = 500  # sats
+    
+    try:
+        paid_amount = await wallet.send_to_lnurl(lnurl, amount)
+        print(f"Successfully sent {paid_amount} sats to {lnurl}")
+    except Exception as e:
+        print(f"Failed to send: {e}")
+    
+    # You can also send to other LNURL formats:
+    # - Bech32 encoded: "LNURL1DP68GURN8GHJ7..."
+    # - With prefix: "lightning:user@domain.com"
+    # - Direct URL: "https://lnurl.service.com/pay/..."
+    
+    # Custom fee parameters
+    await wallet.send_to_lnurl(
+        lnurl,
+        amount=1000,
+        fee_estimate=0.02,  # 2% fee estimate
+        max_fee=50,         # Maximum 50 sats fee
+    )
+```
+
 ### Complete Example
 
 ```python
@@ -174,6 +203,11 @@ async def example_wallet_operations():
             token = await wallet.send(100)
             print(f"Token to share: {token}")
         
+        # Send to Lightning Address
+        if state.balance >= 500:
+            await wallet.send_to_lnurl("user@ln.tips", 500)
+            print("Sent to Lightning Address!")
+        
         # Final balance
         final_state = await wallet.fetch_wallet_state()
         print(f"Final balance: {final_state.balance} sats")
@@ -188,6 +222,7 @@ if __name__ == "__main__":
 - `crypto.py` - Cryptographic primitives (BDHKE and NIP-44 v2 encryption)
 - `mint.py` - Cashu mint API client
 - `relay.py` - Nostr relay WebSocket client
+- `lnurl.py` - LNURL protocol support for Lightning Address payments
 
 ## Security Notes
 

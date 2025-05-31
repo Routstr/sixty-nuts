@@ -1242,6 +1242,84 @@ class Wallet:
 
         return token
 
+    async def send_to_lnurl(
+        self,
+        lnurl: str,
+        amount: int,
+        *,
+        fee_estimate: float = 0.01,
+        max_fee: int | None = None,
+    ) -> int:
+        """Send funds to an LNURL address.
+
+        Args:
+            lnurl: LNURL string (can be lightning:, user@host, bech32, or direct URL)
+            amount: Amount to send in the wallet's currency unit
+            fee_estimate: Fee estimate as a percentage (default: 1%)
+            max_fee: Maximum fee in the wallet's currency unit (optional)
+
+        Returns:
+            Amount actually paid in the wallet's currency unit
+
+        Raises:
+            WalletError: If amount is outside LNURL limits or insufficient balance
+            LNURLError: If LNURL operations fail
+
+        Example:
+            # Send 1000 sats to a Lightning Address
+            paid = await wallet.send_to_lnurl("user@getalby.com", 1000)
+            print(f"Paid {paid} sats")
+        """
+        from .lnurl import get_lnurl_data, get_lnurl_invoice, LNURLError
+
+        # Get LNURL data
+        lnurl_data = await get_lnurl_data(lnurl)
+
+        # Convert amounts based on currency
+        if self.currency == "sat":
+            amount_msat = amount * 1000
+            min_sendable_sat = lnurl_data["min_sendable"] // 1000
+            max_sendable_sat = lnurl_data["max_sendable"] // 1000
+            unit_str = "sat"
+        elif self.currency == "msat":
+            amount_msat = amount
+            min_sendable_sat = lnurl_data["min_sendable"]
+            max_sendable_sat = lnurl_data["max_sendable"]
+            unit_str = "msat"
+        else:
+            raise WalletError(f"Currency {self.currency} not supported for LNURL")
+
+        # Check amount limits
+        if not (
+            lnurl_data["min_sendable"] <= amount_msat <= lnurl_data["max_sendable"]
+        ):
+            raise WalletError(
+                f"Amount {amount} {unit_str} is outside LNURL limits "
+                f"({min_sendable_sat} - {max_sendable_sat} {unit_str})"
+            )
+
+        # Calculate amount to request (subtract estimated fees)
+        estimated_fee = int(amount * fee_estimate)
+        if max_fee is not None:
+            estimated_fee = min(estimated_fee, max_fee)
+        estimated_fee = max(estimated_fee, 1)  # Minimum 1 unit fee
+
+        amount_to_request = amount_msat - (
+            estimated_fee * (1000 if self.currency == "sat" else 1)
+        )
+
+        # Get Lightning invoice
+        bolt11_invoice, invoice_data = await get_lnurl_invoice(
+            lnurl_data["callback_url"], amount_to_request
+        )
+
+        # Pay the invoice using melt
+        await self.melt(bolt11_invoice)
+
+        # Return the actual amount paid (from the invoice)
+        # The melt operation handles the exact amount from the invoice
+        return amount - estimated_fee
+
     async def roll_over_proofs(
         self,
         *,
