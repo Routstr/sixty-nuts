@@ -21,6 +21,7 @@ def mock_websocket():
     """Create a mock websocket."""
     ws = AsyncMock()
     ws.closed = False
+    ws.close_code = None  # Important: websocket state check
     return ws
 
 
@@ -39,6 +40,7 @@ class TestNostrRelay:
         """Test relay connection."""
         mock_ws = AsyncMock()
         mock_ws.closed = False
+        mock_ws.close_code = None
 
         # Make mock_connect async and return the mock_ws
         async def async_connect(*args, **kwargs):
@@ -50,11 +52,15 @@ class TestNostrRelay:
         await relay.connect()
 
         assert relay.ws == mock_ws
-        mock_connect.assert_called_once_with("wss://relay.test.com")
+        # Update assertion to match the actual call with parameters
+        mock_connect.assert_called_once_with(
+            "wss://relay.test.com", ping_interval=20, ping_timeout=10, close_timeout=10
+        )
 
     async def test_disconnect(self, relay, mock_websocket):
         """Test relay disconnection."""
         relay.ws = mock_websocket
+        mock_websocket.close = AsyncMock()  # Make close method async
         await relay.disconnect()
 
         mock_websocket.close.assert_called_once()
@@ -82,12 +88,21 @@ class TestNostrRelay:
 
         assert message == ["OK", "event_id", True]
 
-    async def test_publish_event(self, relay, mock_websocket):
+    @patch("sixty_nuts.relay.websockets.connect")
+    async def test_publish_event(self, mock_connect, relay):
         """Test publishing an event."""
-        relay.ws = mock_websocket
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.close_code = None
+
+        # Make mock_connect async and return the mock_ws
+        async def async_connect(*args, **kwargs):
+            return mock_ws
+
+        mock_connect.side_effect = async_connect
 
         # Mock the response sequence
-        mock_websocket.recv.return_value = '["OK", "event123", true]'
+        mock_ws.recv.return_value = '["OK", "event123", true]'
 
         event = NostrEvent(
             id="event123",
@@ -104,7 +119,7 @@ class TestNostrRelay:
         assert result is True
 
         # Check that EVENT command was sent
-        sent_data = mock_websocket.send.call_args[0][0]
+        sent_data = mock_ws.send.call_args[0][0]
         sent_message = json.loads(sent_data)
         assert sent_message[0] == "EVENT"
         assert sent_message[1]["id"] == "event123"
@@ -115,6 +130,7 @@ class TestNostrRelay:
         """Test fetching events."""
         mock_websocket = AsyncMock()
         mock_websocket.closed = False
+        mock_websocket.close_code = None
 
         # Make mock_connect async and return the mock_websocket
         async def async_connect(*args, **kwargs):
@@ -168,9 +184,18 @@ class TestNostrRelay:
                 break
         assert close_sent
 
-    async def test_subscribe(self, relay, mock_websocket):
+    @patch("sixty_nuts.relay.websockets.connect")
+    async def test_subscribe(self, mock_connect, relay):
         """Test subscribing to events."""
-        relay.ws = mock_websocket
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.close_code = None
+
+        # Make mock_connect async and return the mock_ws
+        async def async_connect(*args, **kwargs):
+            return mock_ws
+
+        mock_connect.side_effect = async_connect
 
         callback = MagicMock()
         filters = [NostrFilter(kinds=[17375])]
@@ -181,7 +206,7 @@ class TestNostrRelay:
         assert relay.subscriptions[sub_id] == callback
 
         # Check that REQ was sent
-        sent_data = mock_websocket.send.call_args[0][0]
+        sent_data = mock_ws.send.call_args[0][0]
         sent_message = json.loads(sent_data)
         assert sent_message[0] == "REQ"
         assert sent_message[1] == sub_id
@@ -202,27 +227,45 @@ class TestNostrRelay:
         sent_message = json.loads(sent_data)
         assert sent_message == ["CLOSE", sub_id]
 
-    async def test_fetch_wallet_events(self, relay, mock_websocket):
+    @patch("sixty_nuts.relay.websockets.connect")
+    async def test_fetch_wallet_events(self, mock_connect, relay):
         """Test fetching wallet events."""
-        relay.ws = mock_websocket
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.close_code = None
+
+        # Make mock_connect async and return the mock_ws
+        async def async_connect(*args, **kwargs):
+            return mock_ws
+
+        mock_connect.side_effect = async_connect
 
         # Mock EOSE response
-        mock_websocket.recv.return_value = json.dumps(["EOSE", "sub_id"])
+        mock_ws.recv.return_value = json.dumps(["EOSE", "sub_id"])
 
         pubkey = "test_pubkey"
         await relay.fetch_wallet_events(pubkey)
 
         # Check the filter was correct
-        sent_data = mock_websocket.send.call_args_list[0][0][0]
+        sent_data = mock_ws.send.call_args_list[0][0][0]
         sent_message = json.loads(sent_data)
         assert sent_message[0] == "REQ"
         filter_obj = sent_message[2]
         assert filter_obj["authors"] == [pubkey]
         assert filter_obj["kinds"] == [17375, 7375, 7376, 7374]
 
-    async def test_fetch_relay_recommendations(self, relay, mock_websocket):
+    @patch("sixty_nuts.relay.websockets.connect")
+    async def test_fetch_relay_recommendations(self, mock_connect, relay):
         """Test fetching relay recommendations."""
-        relay.ws = mock_websocket
+        mock_ws = AsyncMock()
+        mock_ws.closed = False
+        mock_ws.close_code = None
+
+        # Make mock_connect async and return the mock_ws
+        async def async_connect(*args, **kwargs):
+            return mock_ws
+
+        mock_connect.side_effect = async_connect
 
         # Mock response with relay recommendations
         event = {
@@ -239,7 +282,7 @@ class TestNostrRelay:
             "sig": "sig1",
         }
 
-        mock_websocket.recv.side_effect = [
+        mock_ws.recv.side_effect = [
             json.dumps(["EVENT", "sub_id", event]),
             json.dumps(["EOSE", "sub_id"]),
         ]
