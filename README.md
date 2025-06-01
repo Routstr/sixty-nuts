@@ -268,14 +268,6 @@ if __name__ == "__main__":
 - `relay.py` - Nostr relay WebSocket client
 - `lnurl.py` - LNURL protocol support for Lightning Address payments
 
-## Security Notes
-
-⚠️ **Important**: This implementation includes proper NIP-44 encryption for wallet data stored on relays. However:
-
-- The Cashu blinding implementation is simplified and needs proper BDHKE implementation for production use
-- Proof-to-event tracking needs to be implemented for full NIP-60 compliance
-- Consider the security limitations of storing wallet state on public relays
-
 ## TODO
 
 ### Core Implementation
@@ -301,7 +293,7 @@ if __name__ == "__main__":
 - [ ] Implement proper BDHKE blinding for Cashu operations
 - [ ] Improve proof tracking to correctly identify which proofs belong to which token events (wallet.py:1031)
 
-### Features
+### Features (todo)
 
 - [ ] Support for P2PK ecash (NIP-61)
 - [ ] Add comprehensive test suite
