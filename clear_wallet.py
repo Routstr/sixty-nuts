@@ -6,10 +6,11 @@ async def clear_wallet():
     async with Wallet(
         nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
     ) as wallet:
-        # Fetch current state
-        state = await wallet.fetch_wallet_state()
+        # Fetch current state and validate all proofs
+        print("Fetching wallet state and validating proofs...")
+        state = await wallet.fetch_wallet_state(check_proofs=True)
         print(f"Current balance: {state.balance} sats")
-        print(f"Number of proofs: {len(state.proofs)}")
+        print(f"Number of valid proofs: {len(state.proofs)}")
 
         if state.proofs:
             # Delete all token events
@@ -29,8 +30,9 @@ async def clear_wallet():
             # Small delay to ensure events propagate
             await asyncio.sleep(1)
 
-            # Check balance again
-            state = await wallet.fetch_wallet_state()
+            # Check balance again with proof validation
+            print("\nValidating final state...")
+            state = await wallet.fetch_wallet_state(check_proofs=True)
             print(f"\nFinal balance: {state.balance} sats")
             print(f"Number of proofs: {len(state.proofs)}")
         else:
