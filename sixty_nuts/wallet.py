@@ -19,6 +19,7 @@ from .crypto import (
     blind_message,
     unblind_signature,
     NIP44Encrypt,
+    hash_to_curve,
 )
 
 try:
@@ -131,11 +132,13 @@ class Wallet:
         Returns:
             Tuple of (secret, blinding_factor_hex, BlindedMessage)
         """
-        # Generate random 32-byte secret and encode as hex string (64 chars)
+        # Generate random 32-byte secret
         secret_bytes = secrets.token_bytes(32)
+
+        # Convert to hex string (this is what Cashu protocol expects)
         secret_hex = secret_bytes.hex()
 
-        # For hash_to_curve, use UTF-8 encoded bytes of the hex string
+        # For blinding, use UTF-8 bytes of the hex string (Cashu standard)
         secret_utf8_bytes = secret_hex.encode("utf-8")
 
         # Blind the message using the UTF-8 encoded hex string
@@ -145,8 +148,11 @@ class Wallet:
         B_hex = B_.format(compressed=True).hex()
         r_hex = r.hex()
 
+        # For NIP-60 storage, convert to base64
+        secret_base64 = base64.b64encode(secret_bytes).decode("ascii")
+
         return (
-            secret_hex,  # Store as hex string in proof
+            secret_base64,  # Store as base64 string in proof (NIP-60 requirement)
             r_hex,
             BlindedMessage(
                 amount=amount,
@@ -353,9 +359,29 @@ class Wallet:
         self, proofs: list[ProofDict], mint_url: str
     ) -> str:
         """Serialize proofs into a Cashu token format."""
+        # Convert ProofDict (with base64 secrets) to format expected by Cashu tokens (hex secrets)
+        token_proofs = []
+        for proof in proofs:
+            # Convert base64 secret to hex for Cashu token
+            try:
+                secret_bytes = base64.b64decode(proof["secret"])
+                secret_hex = secret_bytes.hex()
+            except Exception:
+                # Fallback: assume it's already hex
+                secret_hex = proof["secret"]
+
+            token_proofs.append(
+                {
+                    "id": proof["id"],
+                    "amount": proof["amount"],
+                    "secret": secret_hex,  # Cashu tokens expect hex
+                    "C": proof["C"],
+                }
+            )
+
         # Cashu token format: cashuA<base64url(json)>
         token_data = {
-            "token": [{"mint": mint_url, "proofs": proofs}],
+            "token": [{"mint": mint_url, "proofs": token_proofs}],
             "unit": self.currency,
             "memo": "NIP-60 wallet transfer",
         }
@@ -380,7 +406,29 @@ class Wallet:
 
             # Extract mint and proofs from JSON format
             mint_info = token_data["token"][0]
-            return mint_info["mint"], mint_info["proofs"]
+            token_proofs = mint_info["proofs"]
+
+            # Convert hex secrets to base64 for NIP-60 storage
+            nip60_proofs: list[ProofDict] = []
+            for proof in token_proofs:
+                # Convert hex secret to base64
+                try:
+                    secret_bytes = bytes.fromhex(proof["secret"])
+                    secret_base64 = base64.b64encode(secret_bytes).decode("ascii")
+                except Exception:
+                    # Fallback: assume it's already base64
+                    secret_base64 = proof["secret"]
+
+                nip60_proofs.append(
+                    ProofDict(
+                        id=proof["id"],
+                        amount=proof["amount"],
+                        secret=secret_base64,  # Store as base64 for NIP-60
+                        C=proof["C"],
+                    )
+                )
+
+            return mint_info["mint"], nip60_proofs
 
         elif token.startswith("cashuB"):
             # Version 4 - CBOR format
@@ -403,12 +451,21 @@ class Wallet:
             for token_entry in token_data["t"]:
                 keyset_id = token_entry["i"].hex()  # Convert bytes to hex
                 for proof in token_entry["p"]:
+                    # CBOR format already has hex secret, convert to base64
+                    secret_hex = proof["s"]
+                    try:
+                        secret_bytes = bytes.fromhex(secret_hex)
+                        secret_base64 = base64.b64encode(secret_bytes).decode("ascii")
+                    except Exception:
+                        # Fallback
+                        secret_base64 = secret_hex
+
                     # Convert CBOR proof format to our ProofDict format
                     proofs.append(
                         ProofDict(
                             id=keyset_id,
                             amount=proof["a"],
-                            secret=proof["s"],
+                            secret=secret_base64,  # Store as base64 for NIP-60
                             C=proof["c"].hex(),  # Convert bytes to hex
                         )
                     )
@@ -435,7 +492,8 @@ class Wallet:
         content_json = json.dumps(content_data)
         encrypted_content = self._nip44_encrypt(content_json)
 
-        # Prepare public tags for quick filtering (spec requires at least one `mint` tag)
+        # NIP-60 requires at least one mint tag in the tags array (unencrypted)
+        # This is critical for wallet discovery!
         tags = [["mint", url] for url in self.mint_urls]
 
         # Create replaceable wallet event
@@ -449,8 +507,42 @@ class Wallet:
         signed_event = self._sign_event(event)
         return await self._publish_to_relays(signed_event)
 
-    async def fetch_wallet_state(self) -> WalletState:
-        """Fetch wallet, token events and compute balance."""
+    def _compute_proof_y_values(self, proofs: list[ProofDict]) -> list[str]:
+        """Compute Y values for proofs to use in check_state API.
+
+        Args:
+            proofs: List of proof dictionaries
+
+        Returns:
+            List of Y values (hex encoded compressed public keys)
+        """
+        y_values = []
+        for proof in proofs:
+            # NIP-60 stores secrets as base64
+            secret_base64 = proof["secret"]
+            try:
+                # Decode base64 to get raw secret bytes
+                secret_bytes = base64.b64decode(secret_base64)
+                # Convert to hex string
+                secret_hex = secret_bytes.hex()
+            except Exception:
+                # Fallback for hex-encoded secrets (backwards compatibility)
+                secret_hex = proof["secret"]
+
+            # Hash to curve point using UTF-8 bytes of hex string (Cashu standard)
+            secret_utf8_bytes = secret_hex.encode("utf-8")
+            Y = hash_to_curve(secret_utf8_bytes)
+            # Convert to compressed hex format
+            y_hex = Y.format(compressed=True).hex()
+            y_values.append(y_hex)
+        return y_values
+
+    async def fetch_wallet_state(self, *, check_proofs: bool = True) -> WalletState:
+        """Fetch wallet, token events and compute balance.
+
+        Args:
+            check_proofs: If True, validate all proofs with mint before returning state
+        """
         relays = await self._get_relay_connections()
         pubkey = self._get_pubkey()
 
@@ -536,6 +628,59 @@ class Wallet:
                 all_proofs.append(proof)
                 proof_to_event_id[proof_id] = event["id"]
 
+        # Check proof validity with mints if requested
+        if check_proofs and all_proofs:
+            valid_proofs = []
+
+            # Group proofs by mint URL for efficient batch checking
+            proofs_by_mint: dict[str, list[ProofDict]] = {}
+            for proof in all_proofs:
+                # Find which mint this proof belongs to based on keyset ID
+                mint_url = None
+                for url in self.mint_urls:
+                    # In practice, you'd need to track which keyset belongs to which mint
+                    # For now, we'll check all mints for this proof
+                    mint_url = url
+                    break
+
+                if mint_url:
+                    if mint_url not in proofs_by_mint:
+                        proofs_by_mint[mint_url] = []
+                    proofs_by_mint[mint_url].append(proof)
+
+            # Check proofs with each mint
+            for mint_url, mint_proofs in proofs_by_mint.items():
+                try:
+                    mint = self._get_mint(mint_url)
+
+                    # Compute Y values for these proofs
+                    y_values = self._compute_proof_y_values(mint_proofs)
+
+                    # Check state with mint
+                    state_response = await mint.check_state(Ys=y_values)
+
+                    # Filter out spent/invalid proofs
+                    for i, proof in enumerate(mint_proofs):
+                        if i < len(state_response["states"]):
+                            state_info = state_response["states"][i]
+                            # Only include proofs that are unspent
+                            if state_info.get("state") == "UNSPENT":
+                                valid_proofs.append(proof)
+                            else:
+                                print(
+                                    f"Warning: Proof {proof['secret'][:8]}... is {state_info.get('state')}"
+                                )
+                        else:
+                            # If no state info, assume it's valid for now
+                            valid_proofs.append(proof)
+
+                except Exception as e:
+                    print(f"Warning: Could not check proofs with mint {mint_url}: {e}")
+                    # If we can't check with mint, include all proofs for this mint
+                    valid_proofs.extend(mint_proofs)
+
+            all_proofs = valid_proofs
+
         # Calculate balance
         balance = sum(p["amount"] for p in all_proofs)
 
@@ -555,6 +700,22 @@ class Wallet:
             mint_keysets=mint_keysets,
             proof_to_event_id=proof_to_event_id,
         )
+
+    async def get_balance(self, *, check_proofs: bool = True) -> int:
+        """Get current wallet balance.
+
+        Args:
+            check_proofs: If True, validate all proofs with mint before returning balance
+
+        Returns:
+            Current balance in the wallet's currency unit
+
+        Example:
+            balance = await wallet.get_balance()
+            print(f"Balance: {balance} sats")
+        """
+        state = await self.fetch_wallet_state(check_proofs=check_proofs)
+        return state.balance
 
     # ───────────────────────────── Token Events ───────────────────────────────
 
@@ -673,14 +834,7 @@ class Wallet:
         # Convert to mint proof format
         mint_proofs: list[Proof] = []
         for p in proofs:
-            mint_proofs.append(
-                Proof(
-                    id=p["id"],
-                    amount=p["amount"],
-                    secret=p["secret"],
-                    C=p["C"],
-                )
-            )
+            mint_proofs.append(self._proofdict_to_mint_proof(p))
 
         # Create blinded messages for new proofs
         # In production, implement proper blinding
@@ -943,8 +1097,8 @@ class Wallet:
         """Pay a Lightning invoice using proofs (melt)."""
         mint = self._get_mint(self.mint_urls[0])
 
-        # Get current wallet state
-        state = await self.fetch_wallet_state()
+        # Get current wallet state with proof validation
+        state = await self.fetch_wallet_state(check_proofs=True)
 
         # Create melt quote
         melt_quote = await mint.create_melt_quote(
@@ -981,7 +1135,7 @@ class Wallet:
         # Convert to mint proof format
         mint_proofs: list[Proof] = []
         for p in selected_proofs:
-            mint_proofs.append(Proof(**p))  # type: ignore
+            mint_proofs.append(self._proofdict_to_mint_proof(p))
 
         # Calculate change
         change_amount = selected_amount - total_needed
@@ -1081,8 +1235,8 @@ class Wallet:
 
     async def send(self, amount: int) -> str:
         """Send Cashu tokens of *amount* and return the serialized token."""
-        # Get current wallet state
-        state = await self.fetch_wallet_state()
+        # Get current wallet state with proof validation
+        state = await self.fetch_wallet_state(check_proofs=True)
 
         # Select proofs to send
         selected_proofs: list[ProofDict] = []
@@ -1116,7 +1270,7 @@ class Wallet:
             # Convert to mint proofs
             mint_proofs: list[Proof] = []
             for p in selected_proofs:
-                mint_proofs.append(Proof(**p))  # type: ignore
+                mint_proofs.append(self._proofdict_to_mint_proof(p))
 
             # Create outputs for exact amount and change
             outputs: list[BlindedMessage] = []
@@ -1359,8 +1513,8 @@ class Wallet:
     async def __aenter__(self) -> "Wallet":
         """Enter async context and auto-initialize wallet."""
         try:
-            # Try to fetch existing wallet state
-            await self.fetch_wallet_state()
+            # Try to fetch existing wallet state with proof validation
+            await self.fetch_wallet_state(check_proofs=True)
         except Exception:
             # If no wallet exists or fetch fails, create a new wallet event
             try:
@@ -1410,13 +1564,33 @@ class Wallet:
 
         if auto_init:
             try:
-                # Try to fetch existing state first
-                await wallet.fetch_wallet_state()
+                # Try to fetch existing state first with proof validation
+                await wallet.fetch_wallet_state(check_proofs=True)
             except Exception:
                 # If no wallet exists, create one
                 await wallet.create_wallet_event()
 
         return wallet
+
+    def _proofdict_to_mint_proof(self, proof_dict: ProofDict) -> Proof:
+        """Convert ProofDict (with base64 secret) to Proof (with hex secret) for mint.
+
+        NIP-60 stores secrets as base64, but Cashu protocol expects hex.
+        """
+        # Decode base64 secret to get raw bytes
+        try:
+            secret_bytes = base64.b64decode(proof_dict["secret"])
+            secret_hex = secret_bytes.hex()
+        except Exception:
+            # Fallback: assume it's already hex (backwards compatibility)
+            secret_hex = proof_dict["secret"]
+
+        return Proof(
+            id=proof_dict["id"],
+            amount=proof_dict["amount"],
+            secret=secret_hex,  # Mint expects hex
+            C=proof_dict["C"],
+        )
 
 
 class TempWallet(Wallet):
@@ -1511,8 +1685,8 @@ class TempWallet(Wallet):
 
         if auto_init:
             try:
-                # Try to fetch existing state first
-                await wallet.fetch_wallet_state()
+                # Try to fetch existing state first with proof validation
+                await wallet.fetch_wallet_state(check_proofs=True)
             except Exception:
                 # If no wallet exists, create one
                 await wallet.create_wallet_event()

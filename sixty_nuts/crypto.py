@@ -176,20 +176,25 @@ class NIP44Encrypt:
 
     @staticmethod
     def calc_padded_len(unpadded_len: int) -> int:
-        """Calculate padded length according to NIP-44."""
+        """Return the padded *plaintext* length (without the 2-byte length prefix).
+
+        The algorithm follows NIP-44 v2 reference implementation:
+        1. Plaintexts of length ≤ 32 are always padded to exactly 32 bytes.
+        2. For longer messages, the length is rounded **up** to the next multiple of
+           `chunk`, where `chunk` is 32 bytes for messages ≤ 256 bytes and
+           `next_power/8` otherwise, with `next_power` being the next power of two
+           of `(unpadded_len - 1)`.
+        """
         if unpadded_len <= 0:
             raise ValueError("Invalid unpadded length")
 
-        # Add 2 for the length prefix
-        total_len = unpadded_len + 2
-
-        if total_len <= 32:
+        if unpadded_len <= 32:
             return 32
 
-        next_power = 1 << (math.floor(math.log2(total_len - 1)) + 1)
+        next_power = 1 << (math.floor(math.log2(unpadded_len - 1)) + 1)
         chunk = 32 if next_power <= 256 else next_power // 8
 
-        return chunk * ((total_len - 1) // chunk + 1)
+        return chunk * ((unpadded_len - 1) // chunk + 1)
 
     @staticmethod
     def pad(plaintext: bytes) -> bytes:
@@ -201,10 +206,14 @@ class NIP44Encrypt:
         ):
             raise ValueError(f"Invalid plaintext length: {unpadded_len}")
 
-        padded_len = NIP44Encrypt.calc_padded_len(unpadded_len)
-        prefix = struct.pack(">H", unpadded_len)  # 2 bytes big-endian
-        padding = bytes(padded_len - 2 - unpadded_len)
+        data_len = NIP44Encrypt.calc_padded_len(unpadded_len)
 
+        # 2-byte big-endian length prefix precedes the plaintext (see spec).
+        prefix = struct.pack(">H", unpadded_len)
+
+        padding = bytes(data_len - unpadded_len)
+
+        # Total padded length = 2 (prefix) + data_len
         return prefix + plaintext + padding
 
     @staticmethod
@@ -217,7 +226,7 @@ class NIP44Encrypt:
         if unpadded_len == 0 or len(padded) < 2 + unpadded_len:
             raise ValueError("Invalid padding")
 
-        expected_len = NIP44Encrypt.calc_padded_len(unpadded_len)
+        expected_len = 2 + NIP44Encrypt.calc_padded_len(unpadded_len)
         if len(padded) != expected_len:
             raise ValueError("Invalid padded length")
 
@@ -225,24 +234,20 @@ class NIP44Encrypt:
 
     @staticmethod
     def get_conversation_key(privkey: PrivateKey, pubkey_hex: str) -> bytes:
-        """Calculate conversation key using ECDH and HKDF."""
-        # Parse public key
+        """Return the 32-byte conversation key (`PRK`) as defined by NIP-44.
+
+        The key is the HKDF-Extract of the shared ECDH *x* coordinate using the
+        ASCII salt ``"nip44-v2"`` and SHA-256.
+        """
         pubkey_bytes = bytes.fromhex(pubkey_hex)
         pubkey_obj = PublicKey(pubkey_bytes)
 
-        # ECDH - get shared x coordinate
+        # ECDH – shared secret is the x-coordinate of k * P.
         shared_point = pubkey_obj.multiply(privkey.secret)
-        shared_x = shared_point.format(compressed=False)[1:33]  # x coordinate only
+        shared_x = shared_point.format(compressed=False)[1:33]
 
-        # HKDF-Extract with salt "nip44-v2"
-        hkdf = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=NIP44Encrypt.SALT,
-            info=None,
-            backend=default_backend(),
-        )
-        return hkdf.derive(shared_x)
+        # HKDF-Extract == HMAC(salt, IKM)
+        return hmac.new(NIP44Encrypt.SALT, shared_x, hashlib.sha256).digest()
 
     @staticmethod
     def get_message_keys(
