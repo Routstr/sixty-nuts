@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Test NIP-44 encryption implementation."""
 
-from typing import Tuple
-
 from coincurve import PrivateKey
 
 from sixty_nuts.crypto import NIP44Encrypt
@@ -59,7 +57,7 @@ if __name__ == "__main__":
 _CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
 
-def _bech32_decode(bech: str) -> Tuple[str, bytes]:
+def _bech32_decode(bech: str) -> tuple[str, bytes]:
     """Return (hrp, data) from a bech32 string – minimal decoder for test."""
     if not bech:
         raise ValueError("empty bech32 string")
