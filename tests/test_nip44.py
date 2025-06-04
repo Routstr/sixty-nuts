@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Test NIP-44 encryption implementation."""
 
+from typing import Tuple
+
 from coincurve import PrivateKey
 
 from sixty_nuts.crypto import NIP44Encrypt
@@ -52,8 +54,6 @@ if __name__ == "__main__":
     print("\nAll tests passed! 🎉")
 
 # ───────────────────────── Additional hard-coded vector test ──────────────────
-
-from typing import Tuple
 
 
 _CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
