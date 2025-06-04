@@ -9,6 +9,41 @@ from uuid import uuid4
 import websockets
 
 
+# -----------------------------------------------------------------------------
+# Python < 3.11 compatibility shim
+# -----------------------------------------------------------------------------
+
+# `asyncio.timeout` was introduced in Python 3.11. When running on an older
+# interpreter we either:
+#   1. Import the identically-named helper from the third-party `async_timeout`
+#      package if available, or
+#   2. Provide a minimal no-op context manager that preserves the API surface
+#      (this means timeouts will not be enforced but code will still run).
+#
+# This approach allows the package (and its test-suite) to execute on Python
+# 3.10 and earlier without modifications, while still benefiting from native
+# timeouts on 3.11+.
+
+from contextlib import asynccontextmanager
+import asyncio
+
+
+if not hasattr(asyncio, "timeout"):
+    try:
+        from async_timeout import timeout as _timeout  # type: ignore
+
+    except ModuleNotFoundError:
+
+        @asynccontextmanager
+        async def _timeout(_delay: float):  # noqa: D401 – simple stub
+            """Fallback that degrades gracefully by disabling the timeout."""
+
+            yield
+
+    # Make the chosen implementation available as `asyncio.timeout`.
+    setattr(asyncio, "timeout", _timeout)  # type: ignore[attr-defined]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Nostr protocol types
 # ──────────────────────────────────────────────────────────────────────────────
