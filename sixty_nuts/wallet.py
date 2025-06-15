@@ -122,6 +122,19 @@ class Wallet:
         # Shared HTTP client reused by all Mint objects
         self.mint_client = httpx.AsyncClient()
 
+        # Cache for proof validation results to prevent re-checking spent proofs
+        self._proof_state_cache: dict[
+            str, dict[str, str]
+        ] = {}  # proof_id -> {state, timestamp}
+        self._cache_expiry = 300  # 5 minutes
+
+        # Track known spent proofs to avoid re-validation
+        self._known_spent_proofs: set[str] = set()
+
+        # Rate limiting for relay operations
+        self._last_relay_operation = 0.0
+        self._min_relay_interval = 1.0  # Minimum 1 second between operations
+
     # ───────────────────────── Crypto Helpers ─────────────────────────────────
 
     def _create_blinded_message(
@@ -328,8 +341,23 @@ class Wallet:
         finally:
             await bootstrap_relay.disconnect()
 
+    async def _rate_limit_relay_operations(self) -> None:
+        """Apply rate limiting to relay operations."""
+        now = time.time()
+        time_since_last = now - self._last_relay_operation
+        if time_since_last < self._min_relay_interval:
+            await asyncio.sleep(self._min_relay_interval - time_since_last)
+        self._last_relay_operation = time.time()
+
+    def _estimate_event_size(self, event: dict) -> int:
+        """Estimate the size of an event in bytes."""
+        return len(json.dumps(event, separators=(",", ":")))
+
     async def _publish_to_relays(self, event: dict) -> str:
         """Publish event to all relays and return event ID."""
+        # Apply rate limiting
+        await self._rate_limit_relay_operations()
+
         relays = await self._get_relay_connections()
         event_dict = NostrEvent(**event)  # type: ignore
 
@@ -348,10 +376,11 @@ class Wallet:
                 continue
 
         if not published:
-            error_msg = "Failed to publish event to any relay. Errors:\n" + "\n".join(
-                errors
-            )
-            raise RelayError(error_msg)
+            # Only log if we can't publish anywhere to avoid log spam
+            error_msg = f"Failed to publish event to any relay. Last error: {errors[-1] if errors else 'Unknown'}"
+            print(f"Warning: {error_msg}")
+            # Don't raise exception - allow operations to continue
+            return event["id"]
 
         return event["id"]
 
@@ -537,6 +566,96 @@ class Wallet:
             y_values.append(y_hex)
         return y_values
 
+    def _is_proof_state_cached(self, proof_id: str) -> tuple[bool, str | None]:
+        """Check if proof state is cached and still valid."""
+        if proof_id in self._proof_state_cache:
+            cache_entry = self._proof_state_cache[proof_id]
+            timestamp = float(cache_entry.get("timestamp", 0))
+            if time.time() - timestamp < self._cache_expiry:
+                return True, cache_entry.get("state")
+        return False, None
+
+    def _cache_proof_state(self, proof_id: str, state: str) -> None:
+        """Cache proof state with timestamp."""
+        self._proof_state_cache[proof_id] = {
+            "state": state,
+            "timestamp": str(time.time()),
+        }
+
+        # Track spent proofs separately for faster lookup
+        if state == "SPENT":
+            self._known_spent_proofs.add(proof_id)
+
+    def clear_spent_proof_cache(self) -> None:
+        """Clear the spent proof cache to prevent memory growth."""
+        self._proof_state_cache.clear()
+        self._known_spent_proofs.clear()
+
+    async def _validate_proofs_with_cache(
+        self, proofs: list[ProofDict]
+    ) -> list[ProofDict]:
+        """Validate proofs using cache to avoid re-checking spent proofs."""
+        valid_proofs = []
+        proofs_to_check: list[ProofDict] = []
+
+        # First pass: check cache and filter out known spent proofs
+        for proof in proofs:
+            proof_id = f"{proof['secret']}:{proof['C']}"
+
+            # Skip known spent proofs immediately
+            if proof_id in self._known_spent_proofs:
+                continue
+
+            is_cached, cached_state = self._is_proof_state_cached(proof_id)
+            if is_cached:
+                if cached_state == "UNSPENT":
+                    valid_proofs.append(proof)
+                # SPENT proofs are filtered out (don't add to valid_proofs)
+            else:
+                proofs_to_check.append(proof)
+
+        # Second pass: validate uncached proofs
+        if proofs_to_check:
+            # Group by mint for batch validation
+            proofs_by_mint: dict[str, list[ProofDict]] = {}
+            for proof in proofs_to_check:
+                # Use first mint URL for all proofs (could be improved)
+                mint_url = self.mint_urls[0] if self.mint_urls else None
+                if mint_url:
+                    if mint_url not in proofs_by_mint:
+                        proofs_by_mint[mint_url] = []
+                    proofs_by_mint[mint_url].append(proof)
+
+            # Validate with each mint
+            for mint_url, mint_proofs in proofs_by_mint.items():
+                try:
+                    mint = self._get_mint(mint_url)
+                    y_values = self._compute_proof_y_values(mint_proofs)
+                    state_response = await mint.check_state(Ys=y_values)
+
+                    for i, proof in enumerate(mint_proofs):
+                        proof_id = f"{proof['secret']}:{proof['C']}"
+                        if i < len(state_response["states"]):
+                            state_info = state_response["states"][i]
+                            state = state_info.get("state", "UNKNOWN")
+
+                            # Cache the result
+                            self._cache_proof_state(proof_id, state)
+
+                            # Only include unspent proofs
+                            if state == "UNSPENT":
+                                valid_proofs.append(proof)
+
+                        else:
+                            # No state info - assume valid but don't cache
+                            valid_proofs.append(proof)
+
+                except Exception:
+                    # If validation fails, include proofs but don't cache
+                    valid_proofs.extend(mint_proofs)
+
+        return valid_proofs
+
     async def fetch_wallet_state(self, *, check_proofs: bool = True) -> WalletState:
         """Fetch wallet, token events and compute balance.
 
@@ -628,58 +747,9 @@ class Wallet:
                 all_proofs.append(proof)
                 proof_to_event_id[proof_id] = event["id"]
 
-        # Check proof validity with mints if requested
+        # Validate proofs using cache system if requested
         if check_proofs and all_proofs:
-            valid_proofs = []
-
-            # Group proofs by mint URL for efficient batch checking
-            proofs_by_mint: dict[str, list[ProofDict]] = {}
-            for proof in all_proofs:
-                # Find which mint this proof belongs to based on keyset ID
-                mint_url = None
-                for url in self.mint_urls:
-                    # In practice, you'd need to track which keyset belongs to which mint
-                    # For now, we'll check all mints for this proof
-                    mint_url = url
-                    break
-
-                if mint_url:
-                    if mint_url not in proofs_by_mint:
-                        proofs_by_mint[mint_url] = []
-                    proofs_by_mint[mint_url].append(proof)
-
-            # Check proofs with each mint
-            for mint_url, mint_proofs in proofs_by_mint.items():
-                try:
-                    mint = self._get_mint(mint_url)
-
-                    # Compute Y values for these proofs
-                    y_values = self._compute_proof_y_values(mint_proofs)
-
-                    # Check state with mint
-                    state_response = await mint.check_state(Ys=y_values)
-
-                    # Filter out spent/invalid proofs
-                    for i, proof in enumerate(mint_proofs):
-                        if i < len(state_response["states"]):
-                            state_info = state_response["states"][i]
-                            # Only include proofs that are unspent
-                            if state_info.get("state") == "UNSPENT":
-                                valid_proofs.append(proof)
-                            else:
-                                print(
-                                    f"Warning: Proof {proof['secret'][:8]}... is {state_info.get('state')}"
-                                )
-                        else:
-                            # If no state info, assume it's valid for now
-                            valid_proofs.append(proof)
-
-                except Exception as e:
-                    print(f"Warning: Could not check proofs with mint {mint_url}: {e}")
-                    # If we can't check with mint, include all proofs for this mint
-                    valid_proofs.extend(mint_proofs)
-
-            all_proofs = valid_proofs
+            all_proofs = await self._validate_proofs_with_cache(all_proofs)
 
         # Calculate balance
         balance = sum(p["amount"] for p in all_proofs)
@@ -719,6 +789,98 @@ class Wallet:
 
     # ───────────────────────────── Token Events ───────────────────────────────
 
+    async def _split_large_token_events(
+        self,
+        proofs: list[ProofDict],
+        mint_url: str,
+        deleted_token_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Split large token events into smaller chunks to avoid relay size limits."""
+        if not proofs:
+            return []
+
+        # Maximum event size (leaving buffer for encryption overhead)
+        max_size = 60000  # 60KB limit with buffer
+        event_ids: list[str] = []
+        current_batch: list[ProofDict] = []
+
+        for proof in proofs:
+            # Test adding this proof to current batch
+            test_batch = current_batch + [proof]
+
+            # Create test event content
+            content_data = {
+                "mint": mint_url,
+                "proofs": test_batch,
+            }
+
+            # Add del field only to first event
+            if deleted_token_ids and not event_ids:
+                content_data["del"] = deleted_token_ids
+
+            content_json = json.dumps(content_data)
+            encrypted_content = self._nip44_encrypt(content_json)
+
+            test_event = self._create_event(
+                kind=EventKind.Token,
+                content=encrypted_content,
+                tags=[],
+            )
+
+            # Check if this would exceed size limit
+            if self._estimate_event_size(test_event) > max_size and current_batch:
+                # Current batch is full, create event and start new batch
+                final_content_data = {
+                    "mint": mint_url,
+                    "proofs": current_batch,
+                }
+
+                # Add del field only to first event
+                if deleted_token_ids and not event_ids:
+                    final_content_data["del"] = deleted_token_ids
+
+                final_content_json = json.dumps(final_content_data)
+                final_encrypted_content = self._nip44_encrypt(final_content_json)
+
+                final_event = self._create_event(
+                    kind=EventKind.Token,
+                    content=final_encrypted_content,
+                    tags=[],
+                )
+
+                signed_event = self._sign_event(final_event)
+                event_id = await self._publish_to_relays(signed_event)
+                event_ids.append(event_id)
+                current_batch = [proof]
+            else:
+                current_batch.append(proof)
+
+        # Add final batch if not empty
+        if current_batch:
+            final_content_data = {
+                "mint": mint_url,
+                "proofs": current_batch,
+            }
+
+            # Add del field only to first event
+            if deleted_token_ids and not event_ids:
+                final_content_data["del"] = deleted_token_ids
+
+            final_content_json = json.dumps(final_content_data)
+            final_encrypted_content = self._nip44_encrypt(final_content_json)
+
+            final_event = self._create_event(
+                kind=EventKind.Token,
+                content=final_encrypted_content,
+                tags=[],
+            )
+
+            signed_event = self._sign_event(final_event)
+            event_id = await self._publish_to_relays(signed_event)
+            event_ids.append(event_id)
+
+        return event_ids
+
     async def publish_token_event(
         self,
         proofs: list[ProofDict],
@@ -734,29 +896,34 @@ class Wallet:
         # Assume all proofs are from the same mint (first mint URL)
         mint_url = self.mint_urls[0]
 
-        # Create token event content
+        # Check if we need to split the event due to size
+        # Create a test event to estimate size
         content_data = {
             "mint": mint_url,
             "proofs": proofs,
         }
 
-        # Add del field if we're replacing old tokens
         if deleted_token_ids:
             content_data["del"] = deleted_token_ids
 
-        # Encrypt content
         content_json = json.dumps(content_data)
         encrypted_content = self._nip44_encrypt(content_json)
 
-        # Create token event
-        event = self._create_event(
+        test_event = self._create_event(
             kind=EventKind.Token,
             content=encrypted_content,
             tags=[],
         )
 
-        # Sign and publish
-        signed_event = self._sign_event(event)
+        # If event is too large, split it
+        if self._estimate_event_size(test_event) > 60000:
+            event_ids = await self._split_large_token_events(
+                proofs, mint_url, deleted_token_ids
+            )
+            return event_ids[0] if event_ids else ""
+
+        # Event is small enough, publish as single event
+        signed_event = self._sign_event(test_event)
         return await self._publish_to_relays(signed_event)
 
     async def delete_token_event(self, event_id: str) -> None:
