@@ -389,7 +389,7 @@ class Wallet:
         encoded = base64.urlsafe_b64encode(json_str.encode()).decode().rstrip("=")
         return f"cashuA{encoded}"
 
-    def _parse_cashu_token(self, token: str) -> tuple[str, list[ProofDict]]:
+    def _parse_cashu_token(self, token: str) -> tuple[str, str, list[ProofDict]]:
         """Parse Cashu token and return (mint_url, proofs)."""
         if not token.startswith("cashu"):
             raise ValueError("Invalid token format")
@@ -406,6 +406,7 @@ class Wallet:
 
             # Extract mint and proofs from JSON format
             mint_info = token_data["token"][0]
+            unit = token_data["unit"]
             token_proofs = mint_info["proofs"]
 
             # Convert hex secrets to base64 for NIP-60 storage
@@ -428,7 +429,7 @@ class Wallet:
                     )
                 )
 
-            return mint_info["mint"], nip60_proofs
+            return mint_info["mint"], unit, nip60_proofs
 
         elif token.startswith("cashuB"):
             # Version 4 - CBOR format
@@ -445,6 +446,7 @@ class Wallet:
             # Extract from CBOR format - different structure
             # 'm' = mint URL, 'u' = unit, 't' = tokens array
             mint_url = token_data["m"]
+            unit = token_data["u"]
             proofs = []
 
             # Each token in 't' has 'i' (keyset id) and 'p' (proofs)
@@ -470,7 +472,7 @@ class Wallet:
                         )
                     )
 
-            return mint_url, proofs
+            return mint_url, unit, proofs
         else:
             raise ValueError(f"Unknown token version: {token[:7]}")
 
@@ -825,10 +827,10 @@ class Wallet:
 
     # ─────────────────────────────── Receive ──────────────────────────────────
 
-    async def redeem(self, token: str) -> int:
+    async def redeem(self, token: str) -> tuple[int, str]:
         """Redeem a Cashu token into the wallet balance."""
         # Parse token
-        mint_url, proofs = self._parse_cashu_token(token)
+        mint_url, unit, proofs = self._parse_cashu_token(token)
         mint = self._get_mint(mint_url)
 
         # Convert to mint proof format
@@ -911,7 +913,7 @@ class Wallet:
             created_token_ids=[token_event_id],
         )
 
-        return total_amount
+        return total_amount, unit
 
     async def create_quote(self, amount: int) -> tuple[str, str]:
         """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string and quote ID.
@@ -1697,6 +1699,6 @@ class TempWallet(Wallet):
 async def redeem_to_lnurl(token: str, lnurl: str) -> int:
     """Redeem a token to an LNURL address and return the amount redeemed."""
     async with TempWallet() as wallet:
-        amount = await wallet.redeem(token)
+        amount, _ = await wallet.redeem(token)
         await wallet.send_to_lnurl(lnurl, amount)
         return amount
