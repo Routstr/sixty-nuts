@@ -827,10 +827,10 @@ class Wallet:
 
     # ─────────────────────────────── Receive ──────────────────────────────────
 
-    async def redeem(self, token: str) -> Tuple[int, str]:
+    async def redeem(self, token: str) -> tuple[int, str]:
         """Redeem a Cashu token into the wallet balance."""
         # Parse token
-        mint_url,unit, proofs = self._parse_cashu_token(token)
+        mint_url, unit, proofs = self._parse_cashu_token(token)
         mint = self._get_mint(mint_url)
 
         # Convert to mint proof format
