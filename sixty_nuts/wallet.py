@@ -55,6 +55,7 @@ class ProofDict(TypedDict):
     amount: int
     secret: str
     C: str
+    mint: str | None  # Add mint URL tracking
 
 
 @dataclass
@@ -455,6 +456,7 @@ class Wallet:
                         amount=proof["amount"],
                         secret=secret_base64,  # Store as base64 for NIP-60
                         C=proof["C"],
+                        mint=mint_info["mint"],
                     )
                 )
 
@@ -498,6 +500,7 @@ class Wallet:
                             amount=proof["a"],
                             secret=secret_base64,  # Store as base64 for NIP-60
                             C=proof["c"].hex(),  # Convert bytes to hex
+                            mint=mint_url,
                         )
                     )
 
@@ -691,16 +694,20 @@ class Wallet:
 
         # Parse wallet metadata
         if wallet_event:
-            decrypted = self._nip44_decrypt(wallet_event["content"])
-            wallet_data = json.loads(decrypted)
+            try:
+                decrypted = self._nip44_decrypt(wallet_event["content"])
+                wallet_data = json.loads(decrypted)
 
-            # Update mint URLs from wallet event
-            self.mint_urls = []
-            for item in wallet_data:
-                if item[0] == "mint":
-                    self.mint_urls.append(item[1])
-                elif item[0] == "privkey":
-                    self.wallet_privkey = item[1]
+                # Update mint URLs from wallet event
+                self.mint_urls = []
+                for item in wallet_data:
+                    if item[0] == "mint":
+                        self.mint_urls.append(item[1])
+                    elif item[0] == "privkey":
+                        self.wallet_privkey = item[1]
+            except Exception as e:
+                # Skip wallet event if it can't be decrypted
+                print(f"Warning: Could not decrypt wallet event: {e}")
 
         # Collect token events
         token_events = [e for e in all_events if e["kind"] == EventKind.Token]
@@ -729,8 +736,13 @@ class Wallet:
             if event["id"] in invalid_token_ids:
                 continue
 
-            decrypted = self._nip44_decrypt(event["content"])
-            token_data = json.loads(decrypted)
+            try:
+                decrypted = self._nip44_decrypt(event["content"])
+                token_data = json.loads(decrypted)
+            except Exception as e:
+                # Skip this event if it can't be decrypted
+                print(f"Warning: Could not decrypt token event {event['id']}: {e}")
+                continue
 
             # Mark tokens referenced in the "del" field as superseded
             for old_id in token_data.get("del", []):
@@ -740,13 +752,24 @@ class Wallet:
                 continue
 
             proofs = token_data.get("proofs", [])
+            mint_url = token_data.get(
+                "mint", self.mint_urls[0] if self.mint_urls else None
+            )
 
             for proof in proofs:
                 proof_id = f"{proof['secret']}:{proof['C']}"
                 if proof_id in proof_seen:
                     continue
                 proof_seen.add(proof_id)
-                all_proofs.append(proof)
+                # Add mint URL to proof
+                proof_with_mint: ProofDict = ProofDict(
+                    id=proof["id"],
+                    amount=proof["amount"],
+                    secret=proof["secret"],
+                    C=proof["C"],
+                    mint=mint_url,
+                )
+                all_proofs.append(proof_with_mint)
                 proof_to_event_id[proof_id] = event["id"]
 
         # Validate proofs using cache system if requested
@@ -895,8 +918,14 @@ class Wallet:
             for token_id in deleted_token_ids:
                 await self.delete_token_event(token_id)
 
-        # Assume all proofs are from the same mint (first mint URL)
-        mint_url = self.mint_urls[0]
+        # Get mint URL from proofs or use default
+        if proofs and proofs[0].get("mint"):
+            mint_url = proofs[0]["mint"]
+        else:
+            mint_url = self.mint_urls[0] if self.mint_urls else None
+
+        if not mint_url:
+            raise WalletError("No mint URL available for token event")
 
         # Check if we need to split the event due to size
         # Create a test event to estimate size
@@ -994,10 +1023,28 @@ class Wallet:
 
     # ─────────────────────────────── Receive ──────────────────────────────────
 
-    async def redeem(self, token: str) -> tuple[int, str]:
-        """Redeem a Cashu token into the wallet balance."""
+    async def redeem(self, token: str, *, auto_swap: bool = True) -> tuple[int, str]:
+        """Redeem a Cashu token into the wallet balance.
+
+        If the token is from an untrusted mint (not in wallet's mint_urls),
+        it will automatically be swapped to the wallet's primary mint.
+
+        Args:
+            token: Cashu token to redeem
+            auto_swap: If True, automatically swap tokens from untrusted mints
+
+        Returns:
+            Tuple of (amount, unit) added to wallet
+        """
         # Parse token
         mint_url, unit, proofs = self._parse_cashu_token(token)
+
+        # Check if this is a trusted mint
+        if auto_swap and self.mint_urls and mint_url not in self.mint_urls:
+            # Token is from untrusted mint - swap to our primary mint
+            return await self.swap_mints(token, target_mint=self.mint_urls[0])
+
+        # Proceed with normal redemption for trusted mints
         mint = self._get_mint(mint_url)
 
         # Convert to mint proof format
@@ -1067,6 +1114,7 @@ class Wallet:
                     amount=sig["amount"],
                     secret=secrets[i],
                     C=C.format(compressed=True).hex(),
+                    mint=mint_url,
                 )
             )
 
@@ -1081,6 +1129,235 @@ class Wallet:
         )
 
         return total_amount, unit
+
+    async def swap_mints(
+        self,
+        token: str,
+        *,
+        target_mint: str | None = None,
+        fee_reserve_percent: float = 0.01,
+        min_amount_after_fees: int = 1,
+    ) -> tuple[int, str]:
+        """Swap tokens from any mint to a trusted mint via Lightning.
+
+        This is useful for merchants accepting tokens from untrusted mints.
+        The tokens are immediately melted from the source mint and minted
+        at the target mint.
+
+        Note: The redeem() method automatically calls this when receiving
+        tokens from untrusted mints, so you typically don't need to call
+        this directly unless you want explicit control over the target mint.
+
+        Args:
+            token: Cashu token to swap
+            target_mint: Target mint URL (defaults to wallet's first mint)
+            fee_reserve_percent: Lightning fee reserve as percentage (default: 1%)
+            min_amount_after_fees: Minimum acceptable amount after fees (default: 1)
+
+        Returns:
+            Tuple of (amount_received, unit) at the target mint
+
+        Raises:
+            WalletError: If swap fails
+
+        Example:
+            # Explicitly swap to a specific mint (different from wallet's default)
+            amount, unit = await wallet.swap_mints(
+                untrusted_token,
+                target_mint="https://my-specific-mint.com"
+            )
+        """
+        # Parse the incoming token
+        source_mint_url, unit, proofs = self._parse_cashu_token(token)
+        total_amount = sum(p["amount"] for p in proofs)
+
+        # Use default mint if no target specified
+        if target_mint is None:
+            if not self.mint_urls:
+                raise WalletError(
+                    "No target mint specified and no default mints configured"
+                )
+            target_mint = self.mint_urls[0]
+
+        # Skip if source and target are the same
+        if source_mint_url == target_mint:
+            return await self.redeem(token)
+
+        # Get mint instances
+        source_mint = self._get_mint(source_mint_url)
+        target_mint_obj = self._get_mint(target_mint)
+
+        # Step 1: First, we need to estimate fees by creating a test melt quote
+        # Create a small test invoice to check fee structure
+        test_quote_resp = await target_mint_obj.create_mint_quote(
+            unit=unit,
+            amount=1,  # Minimal amount to test fees
+        )
+        test_invoice = test_quote_resp["request"]
+
+        # Check fee structure with source mint
+        test_melt_quote = await source_mint.create_melt_quote(
+            unit=unit,
+            request=test_invoice,
+        )
+
+        # Estimate fees as a percentage of amount (usually 1-3%)
+        # Use the fee_reserve from test quote as a baseline
+        fee_percentage = test_melt_quote.get("fee_reserve", 1) / 100.0
+        estimated_fee = max(int(total_amount * fee_percentage), 1)
+
+        # For small amounts, fees might be a fixed minimum
+        if test_melt_quote.get("fee_reserve", 0) >= 1:
+            # If fee reserve is significant for 1 sat, use a higher estimate
+            estimated_fee = max(estimated_fee, test_melt_quote["fee_reserve"])
+
+        # Step 2: Create mint quote at target mint for amount minus estimated fees
+        amount_to_mint = total_amount - estimated_fee
+        if amount_to_mint < min_amount_after_fees:
+            raise WalletError(
+                f"Token amount ({total_amount}) minus fees ({estimated_fee}) "
+                f"would be {amount_to_mint}, below minimum ({min_amount_after_fees})"
+            )
+
+        quote_resp = await target_mint_obj.create_mint_quote(
+            unit=unit,
+            amount=amount_to_mint,
+        )
+        lightning_invoice = quote_resp["request"]
+        quote_id = quote_resp["quote"]
+
+        # Step 3: Create melt quote at source mint with actual invoice
+        melt_quote = await source_mint.create_melt_quote(
+            unit=unit,
+            request=lightning_invoice,
+        )
+
+        # Check if we have enough to cover the actual fees
+        required_amount = melt_quote["amount"] + melt_quote["fee_reserve"]
+        if total_amount < required_amount:
+            # Try again with a smaller amount
+            amount_to_mint = total_amount - melt_quote["fee_reserve"]
+            if amount_to_mint < min_amount_after_fees:
+                raise WalletError(
+                    f"Token amount ({total_amount}) minus fees ({melt_quote['fee_reserve']}) "
+                    f"would be {amount_to_mint}, below minimum ({min_amount_after_fees})"
+                )
+
+            # Create new mint quote with adjusted amount
+            quote_resp = await target_mint_obj.create_mint_quote(
+                unit=unit,
+                amount=amount_to_mint,
+            )
+            lightning_invoice = quote_resp["request"]
+            quote_id = quote_resp["quote"]
+
+            # Create new melt quote
+            melt_quote = await source_mint.create_melt_quote(
+                unit=unit,
+                request=lightning_invoice,
+            )
+
+        # Step 4: Melt tokens at source mint to pay the invoice
+        # Convert proofs to mint format
+        mint_proofs: list[Proof] = []
+        for p in proofs:
+            mint_proofs.append(self._proofdict_to_mint_proof(p))
+
+        # Execute melt (no outputs needed since we're spending all)
+        try:
+            melt_resp = await source_mint.melt(
+                quote=melt_quote["quote"],
+                inputs=mint_proofs,
+                outputs=None,
+            )
+        except Exception as e:
+            raise WalletError(f"Failed to melt tokens from source mint: {str(e)}")
+
+        # Step 5: Check that payment was successful at target mint
+        quote_status = await target_mint_obj.get_mint_quote(quote_id)
+
+        if not quote_status.get("paid") or quote_status.get("state") != "PAID":
+            raise WalletError("Lightning payment failed during mint swap")
+
+        # Step 6: Mint new tokens at target mint
+        # Create blinded messages
+        outputs: list[BlindedMessage] = []
+        secrets: list[str] = []
+        blinding_factors: list[str] = []
+
+        # Get active keyset from target mint
+        keys_resp = await target_mint_obj.get_keys()
+        keysets = keys_resp.get("keysets", [])
+        if not keysets:
+            raise WalletError("Target mint has no active keysets")
+        keyset_id = keysets[0]["id"]
+
+        # The amount we'll receive is what we requested to mint
+        # (already accounts for fees in the mint quote)
+        amount_received = amount_to_mint
+
+        # Create outputs for the received amount
+        remaining = amount_received
+        for denom in [64, 32, 16, 8, 4, 2, 1]:
+            while remaining >= denom:
+                secret, r_hex, blinded_msg = self._create_blinded_message(
+                    denom, keyset_id
+                )
+                outputs.append(blinded_msg)
+                secrets.append(secret)
+                blinding_factors.append(r_hex)
+                remaining -= denom
+
+        # Mint new tokens
+        mint_resp = await target_mint_obj.mint(quote=quote_id, outputs=outputs)
+
+        # Get mint keys for unblinding
+        mint_keys = None
+        for ks in keys_resp.get("keysets", []):
+            if ks["id"] == keyset_id:
+                keys_data: str | dict[str, str] = ks.get("keys", {})
+                if isinstance(keys_data, dict) and keys_data:
+                    mint_keys = keys_data
+                    break
+
+        if not mint_keys:
+            raise WalletError("Could not find target mint keys")
+
+        # Convert signatures to proofs
+        new_proofs: list[ProofDict] = []
+        for i, sig in enumerate(mint_resp["signatures"]):
+            # Get the public key for this amount
+            amount = sig["amount"]
+            mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+            if not mint_pubkey:
+                raise WalletError(f"Could not find mint public key for amount {amount}")
+
+            # Unblind the signature
+            C_ = PublicKey(bytes.fromhex(sig["C_"]))
+            r = bytes.fromhex(blinding_factors[i])
+            C = unblind_signature(C_, r, mint_pubkey)
+
+            new_proofs.append(
+                ProofDict(
+                    id=sig["id"],
+                    amount=sig["amount"],
+                    secret=secrets[i],
+                    C=C.format(compressed=True).hex(),
+                    mint=target_mint,
+                )
+            )
+
+        # Publish new token event
+        token_event_id = await self.publish_token_event(new_proofs)
+
+        # Publish spending history
+        await self.publish_spending_history(
+            direction="in",
+            amount=amount_received,
+            created_token_ids=[token_event_id],
+        )
+
+        return amount_received, unit
 
     async def create_quote(self, amount: int) -> tuple[str, str]:
         """Create a Lightning invoice (quote) at the mint and return the BOLT-11 string and quote ID.
@@ -1203,6 +1480,7 @@ class Wallet:
                         amount=sig["amount"],
                         secret=secrets[i],
                         C=C.format(compressed=True).hex(),
+                        mint=self.mint_urls[0],
                     )
                 )
 
@@ -1264,29 +1542,54 @@ class Wallet:
 
     async def melt(self, invoice: str) -> None:
         """Pay a Lightning invoice using proofs (melt)."""
-        mint = self._get_mint(self.mint_urls[0])
-
         # Get current wallet state with proof validation
         state = await self.fetch_wallet_state(check_proofs=True)
 
-        # Create melt quote
-        melt_quote = await mint.create_melt_quote(
-            unit=self.currency,
-            request=invoice,
-        )
+        # Group proofs by mint
+        proofs_by_mint: dict[str, list[ProofDict]] = {}
+        for proof in state.proofs:
+            mint_url = proof.get("mint") or (
+                self.mint_urls[0] if self.mint_urls else None
+            )
+            if mint_url:
+                if mint_url not in proofs_by_mint:
+                    proofs_by_mint[mint_url] = []
+                proofs_by_mint[mint_url].append(proof)
 
+        # Try each mint to see which can handle the invoice
+        melt_mint_url: str | None = None
+        melt_quote = None
+
+        for mint_url in proofs_by_mint.keys():
+            try:
+                mint = self._get_mint(mint_url)
+                # Create melt quote
+                quote = await mint.create_melt_quote(
+                    unit=self.currency,
+                    request=invoice,
+                )
+                melt_mint_url = mint_url
+                melt_quote = quote
+                break
+            except Exception:
+                # This mint can't handle the invoice, try next
+                continue
+
+        if not melt_mint_url or not melt_quote:
+            raise WalletError("No mint can handle this invoice")
+
+        mint = self._get_mint(melt_mint_url)
         quote_id = melt_quote["quote"]
         total_needed = melt_quote["amount"] + melt_quote["fee_reserve"]
 
-        # Select proofs to spend
-        # TODO: Implement better coin selection algorithm to minimize
-        # the number of proofs used and optimize privacy
+        # Select proofs to spend from the mint that can handle the invoice
+        mint_proofs_available = proofs_by_mint.get(melt_mint_url, [])
         selected_proofs: list[ProofDict] = []
         selected_amount = 0
         events_to_delete: set[str] = set()
         proof_to_event_id = state.proof_to_event_id or {}
 
-        for proof in state.proofs:
+        for proof in mint_proofs_available:
             if selected_amount >= total_needed:
                 break
             selected_proofs.append(proof)
@@ -1298,7 +1601,7 @@ class Wallet:
 
         if selected_amount < total_needed:
             raise WalletError(
-                f"Insufficient balance. Need {total_needed}, have {selected_amount}"
+                f"Insufficient balance at mint {melt_mint_url}. Need {total_needed}, have {selected_amount}"
             )
 
         # Convert to mint proof format
@@ -1350,14 +1653,7 @@ class Wallet:
                         mint_keys = keys_data
                         break
 
-        # Delete old token events (find which events contained the spent proofs)
-        # For simplicity, assume one event per mint
-        # In production, track which proofs belong to which events
-
-        # TODO: This is incorrect - need to track which proofs belong to which
-        # token events to properly delete them. Current implementation doesn't
-        # maintain this mapping, violating NIP-60 requirements.
-
+        # Delete old token events
         old_token_ids = list(events_to_delete)
 
         # Create new token event for change
@@ -1383,6 +1679,7 @@ class Wallet:
                         amount=sig["amount"],
                         secret=change_secrets[i],
                         C=C.format(compressed=True).hex(),
+                        mint=melt_mint_url,
                     )
                 )
 
@@ -1407,21 +1704,52 @@ class Wallet:
         # Get current wallet state with proof validation
         state = await self.fetch_wallet_state(check_proofs=True)
 
-        # Select proofs to send
+        # Group proofs by mint
+        proofs_by_mint: dict[str, list[ProofDict]] = {}
+        for proof in state.proofs:
+            mint_url = proof.get("mint") or (
+                self.mint_urls[0] if self.mint_urls else None
+            )
+            if mint_url:
+                if mint_url not in proofs_by_mint:
+                    proofs_by_mint[mint_url] = []
+                proofs_by_mint[mint_url].append(proof)
+
+        # Select proofs to send, preferring a single mint if possible
         selected_proofs: list[ProofDict] = []
         selected_amount = 0
-        remaining_proofs: list[ProofDict] = []
+        selected_mint_url: str | None = None
+
+        # First try to select from a single mint
+        for mint_url, mint_proofs in proofs_by_mint.items():
+            mint_total = sum(p["amount"] for p in mint_proofs)
+            if mint_total >= amount:
+                # Can satisfy amount from this mint alone
+                for proof in mint_proofs:
+                    if selected_amount < amount:
+                        selected_proofs.append(proof)
+                        selected_amount += proof["amount"]
+                    if selected_amount >= amount:
+                        selected_mint_url = mint_url
+                        break
+                if selected_mint_url:
+                    break
+
+        # If we couldn't satisfy from a single mint, we need to fail
+        # (multi-mint sends would require creating multiple tokens)
+        if not selected_mint_url:
+            raise WalletError(
+                f"Cannot send {amount} from a single mint. Multi-mint sends not yet supported."
+            )
 
         # Track which events contain selected proofs
         events_to_delete: set[str] = set()
         proof_to_event_id = state.proof_to_event_id or {}
+        remaining_proofs: list[ProofDict] = []
 
         for proof in state.proofs:
-            if selected_amount < amount:
-                selected_proofs.append(proof)
-                selected_amount += proof["amount"]
-                # Track which event this proof came from
-                proof_id = f"{proof['secret']}:{proof['C']}"
+            proof_id = f"{proof['secret']}:{proof['C']}"
+            if proof in selected_proofs:
                 if proof_id in proof_to_event_id:
                     events_to_delete.add(proof_to_event_id[proof_id])
             else:
@@ -1434,12 +1762,12 @@ class Wallet:
 
         # If we selected too much, need to split
         if selected_amount > amount:
-            mint = self._get_mint(self.mint_urls[0])
+            mint = self._get_mint(selected_mint_url)
 
             # Convert to mint proofs
-            mint_proofs: list[Proof] = []
+            mint_proofs_for_swap: list[Proof] = []
             for p in selected_proofs:
-                mint_proofs.append(self._proofdict_to_mint_proof(p))
+                mint_proofs_for_swap.append(self._proofdict_to_mint_proof(p))
 
             # Create outputs for exact amount and change
             outputs: list[BlindedMessage] = []
@@ -1482,7 +1810,7 @@ class Wallet:
                     remaining -= denom
 
             # Swap for exact denominations
-            swap_resp = await mint.swap(inputs=mint_proofs, outputs=outputs)
+            swap_resp = await mint.swap(inputs=mint_proofs_for_swap, outputs=outputs)
 
             # Get mint public key for unblinding
             keys_resp = await mint.get_keys()
@@ -1520,6 +1848,7 @@ class Wallet:
                     amount=sig["amount"],
                     secret=all_secrets[i],
                     C=C.format(compressed=True).hex(),
+                    mint=selected_mint_url,
                 )
 
                 if i < len(send_outputs):
@@ -1528,29 +1857,33 @@ class Wallet:
                     change_proofs.append(proof)
 
             # Update remaining proofs with change proofs
-            remaining_proofs = change_proofs
+            remaining_proofs.extend(change_proofs)
             selected_proofs = send_proofs
 
-            # Also need to include any proofs we didn't select initially
-            for proof in state.proofs:
-                proof_id = f"{proof['secret']}:{proof['C']}"
-                if (
-                    proof_id in proof_to_event_id
-                    and proof_to_event_id[proof_id] not in events_to_delete
-                ):
-                    remaining_proofs.append(proof)
-
         # Create Cashu token
-        token = self._serialize_proofs_for_token(selected_proofs, self.mint_urls[0])
+        token = self._serialize_proofs_for_token(selected_proofs, selected_mint_url)
 
         # Delete old token events and create new one for remaining
         deleted_event_ids = list(events_to_delete)
 
         if remaining_proofs:
-            token_event_id = await self.publish_token_event(
-                remaining_proofs, deleted_token_ids=deleted_event_ids
-            )
-            created_ids = [token_event_id]
+            # Group remaining proofs by mint for publishing
+            remaining_by_mint: dict[str, list[ProofDict]] = {}
+            for proof in remaining_proofs:
+                mint_url = proof.get("mint") or selected_mint_url
+                if mint_url not in remaining_by_mint:
+                    remaining_by_mint[mint_url] = []
+                remaining_by_mint[mint_url].append(proof)
+
+            # Publish token events for each mint
+            created_ids: list[str] = []
+            for mint_url, mint_proofs in remaining_by_mint.items():
+                # Need to update publish_token_event to accept mint_url parameter
+                token_event_id = await self.publish_token_event(
+                    mint_proofs,
+                    deleted_token_ids=deleted_event_ids if not created_ids else None,
+                )
+                created_ids.append(token_event_id)
         else:
             # Still need to delete old events even if no remaining proofs
             for event_id in deleted_event_ids:
