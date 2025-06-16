@@ -36,7 +36,8 @@ async def test_wallet_token_cycle():
         try:
             # Redeem the token
             print("Redeeming token from .cashu file...")
-            await wallet.redeem(token)
+            redeemed_amount, _ = await wallet.redeem(token)
+            print(f"Successfully redeemed {redeemed_amount} sats")
 
             # Longer delay to avoid rate limiting
             await asyncio.sleep(2)
@@ -75,13 +76,16 @@ async def test_wallet_token_cycle():
             return redeemed_amount
 
         except Exception as e:
-            # If token was already spent, that's okay - previous test already used it
-            if "already spent" in str(e):
-                print(
-                    "Token was already spent - this is expected if the test ran before"
-                )
-                return 10  # Return a dummy amount to pass the test
-            raise
+            # Print the actual error to see what's happening
+            print(f"Error during redemption: {type(e).__name__}: {e}")
+
+            # If token was already spent, skip the test
+            if "already spent" in str(e).lower():
+                print("\n❌ Token in .cashu file is already spent!")
+                print("To create a fresh token, run: python tests/mint_test_token.py")
+                pytest.skip("Token already spent - need to mint a fresh token")
+            else:
+                raise
 
 
 @pytest.mark.asyncio

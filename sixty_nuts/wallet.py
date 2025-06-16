@@ -1604,6 +1604,16 @@ class Wallet:
                 f"Insufficient balance at mint {melt_mint_url}. Need {total_needed}, have {selected_amount}"
             )
 
+        # Filter proofs to only those with valid keysets for this mint
+        selected_proofs = await self._filter_proofs_by_keyset(
+            mint,
+            selected_proofs,
+            total_needed,
+            operation=f"melt {total_needed} at mint {melt_mint_url}",
+        )
+        # Recalculate selected amount after filtering
+        selected_amount = sum(p["amount"] for p in selected_proofs)
+
         # Convert to mint proof format
         mint_proofs: list[Proof] = []
         for p in selected_proofs:
@@ -1760,9 +1770,20 @@ class Wallet:
                 f"Insufficient balance. Need {amount}, have {state.balance}"
             )
 
+        # Get the mint client for the selected mint
+        mint = self._get_mint(selected_mint_url)
+
         # If we selected too much, need to split
         if selected_amount > amount:
-            mint = self._get_mint(selected_mint_url)
+            # Filter proofs to only those with valid keysets for this mint
+            selected_proofs = await self._filter_proofs_by_keyset(
+                mint,
+                selected_proofs,
+                amount,
+                operation=f"send {amount} from mint {selected_mint_url}",
+            )
+            # Recalculate selected amount after filtering
+            selected_amount = sum(p["amount"] for p in selected_proofs)
 
             # Convert to mint proofs
             mint_proofs_for_swap: list[Proof] = []
@@ -1831,11 +1852,11 @@ class Wallet:
 
             for i, sig in enumerate(swap_resp["signatures"]):
                 # Get the public key for this amount
-                amount = sig["amount"]
-                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                amount_val = sig["amount"]
+                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount_val)
                 if not mint_pubkey:
                     raise WalletError(
-                        f"Could not find mint public key for amount {amount}"
+                        f"Could not find mint public key for amount {amount_val}"
                     )
 
                 # Unblind the signature
@@ -2093,6 +2114,55 @@ class Wallet:
             secret=secret_hex,  # Mint expects hex
             C=proof_dict["C"],
         )
+
+    async def _filter_proofs_by_keyset(
+        self,
+        mint: Mint,
+        proofs: list[ProofDict],
+        required_amount: int,
+        *,
+        operation: str = "spend",
+    ) -> list[ProofDict]:
+        """Filter proofs to only those with valid keysets for the given mint.
+
+        Args:
+            mint: The mint instance to validate against
+            proofs: List of proofs to filter
+            required_amount: Minimum amount needed after filtering
+            operation: Description of the operation for error messages
+
+        Returns:
+            Filtered list of proofs with valid keysets
+
+        Raises:
+            WalletError: If not enough valid proofs to meet required_amount
+        """
+        # Get valid keysets for this mint
+        try:
+            keysets_resp = await mint.get_keysets()
+            valid_keyset_ids = {ks["id"] for ks in keysets_resp.get("keysets", [])}
+        except Exception:
+            # If we can't get keysets, return all proofs and let mint validate
+            return proofs
+
+        # Filter proofs to only those with valid keysets
+        valid_proofs = [p for p in proofs if p["id"] in valid_keyset_ids]
+        invalid_proofs = [p for p in proofs if p["id"] not in valid_keyset_ids]
+
+        if invalid_proofs:
+            # Some proofs have unknown keysets
+            invalid_amount = sum(p["amount"] for p in invalid_proofs)
+            valid_amount = sum(p["amount"] for p in valid_proofs)
+
+            if valid_amount < required_amount:
+                # Can't satisfy amount with valid proofs alone
+                raise WalletError(
+                    f"Cannot {operation} {required_amount}. "
+                    f"Found {invalid_amount} in proofs with unknown keysets "
+                    f"(possibly from other mints). Valid balance: {valid_amount}"
+                )
+
+        return valid_proofs
 
 
 class TempWallet(Wallet):
