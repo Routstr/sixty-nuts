@@ -1265,7 +1265,7 @@ class Wallet:
 
         # Execute melt (no outputs needed since we're spending all)
         try:
-            melt_resp = await source_mint.melt(
+            _ = await source_mint.melt(
                 quote=melt_quote["quote"],
                 inputs=mint_proofs,
                 outputs=None,
