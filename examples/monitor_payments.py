@@ -21,7 +21,7 @@ async def monitor_payment(wallet: Wallet, amount: int, description: str = ""):
     print(f"⚡ Lightning Invoice: {invoice}")
     print("=" * 60)
     print(f"\n💵 Amount: {amount} sats")
-    print(f"⏱️  Timeout: 5 minutes")
+    print("⏱️  Timeout: 5 minutes")
     print("\nWaiting for payment...")
 
     # Show progress while waiting

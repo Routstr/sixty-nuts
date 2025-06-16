@@ -19,7 +19,7 @@ async def send_to_address(wallet: Wallet, address: str, amount: int):
         actual_paid = await wallet.send_to_lnurl(address, amount)
 
         print(f"✅ Successfully sent {actual_paid} sats!")
-        print(f"   (After estimated Lightning fees)")
+        print("   (After estimated Lightning fees)")
 
         # Show remaining balance
         balance = await wallet.get_balance()
