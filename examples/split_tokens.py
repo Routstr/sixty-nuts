@@ -55,7 +55,7 @@ async def prepare_exact_amount(wallet: Wallet, amount: int):
 
     try:
         token = await wallet.send(amount)
-        print(f"✅ Token ready: {token[:50]}...")
+        print(f"✅ Token ready: {token}")
         return token
     except Exception as e:
         print(f"❌ Failed to prepare token: {e}")

@@ -12,8 +12,8 @@ from sixty_nuts.wallet import Wallet
 # Popular Cashu mints for demonstration
 MINTS = {
     "minibits": "https://mint.minibits.cash/Bitcoin",
-    "lnbits": "https://legend.lnbits.com/cashu/api/v1/AptDNABNBXv8gpuywhx6NV",
-    "mutiny": "https://cashu.mutinywallet.com",
+    "21mint": "https://21mint.me",
+    "stablenut": "https://stablenut.cashu.network",
 }
 
 
@@ -165,7 +165,7 @@ async def main():
     # Initialize wallet with multiple mints
     async with Wallet(
         nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
-        mint_urls=[MINTS["minibits"], MINTS["lnbits"]],
+        mint_urls=[MINTS["minibits"], MINTS["21mint"]],
     ) as wallet:
         # Check balances across mints
         balances = await check_multi_mint_balance(wallet)

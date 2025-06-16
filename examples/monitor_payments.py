@@ -113,7 +113,7 @@ async def main():
     ) as wallet:
         # Example 1: Monitor single payment
         print("Example 1: Single payment monitoring")
-        await monitor_payment(wallet, 1000, "Test payment")
+        await monitor_payment(wallet, 21, "Test payment")
 
         # Example 2: Multiple concurrent payments (commented out for demo)
         # await process_multiple_payments(wallet)
