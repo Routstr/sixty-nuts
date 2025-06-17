@@ -13,7 +13,7 @@ import asyncio
 import httpx
 from coincurve import PrivateKey, PublicKey
 
-from .mint import Mint, ProofComplete as Proof, BlindedMessage
+from .mint import Mint, ProofComplete as Proof, BlindedMessage, CurrencyUnit
 from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
     blind_message,
@@ -76,9 +76,6 @@ class WalletState:
     )
 
 
-Direction = Literal["in", "out"]
-
-
 class WalletError(Exception):
     """Base class for wallet errors."""
 
@@ -96,7 +93,7 @@ class Wallet:
         nsec: str,  # nostr private key
         *,
         mint_urls: list[str] | None = None,  # cashu mint urls (can have multiple)
-        currency: Literal["sat", "msat", "usd"] = "sat",
+        currency: CurrencyUnit = "sat",  # Updated to use NUT-01 compliant type
         wallet_privkey: str | None = None,  # separate privkey for P2PK ecash (NIP-61)
         relays: list[str] | None = None,  # nostr relays to use
     ) -> None:
@@ -104,6 +101,9 @@ class Wallet:
         self._privkey = self._decode_nsec(nsec)
         self.mint_urls: list[str] = mint_urls or ["https://mint.minibits.cash/Bitcoin"]
         self.currency = currency
+        # Validate currency unit is supported
+        self._validate_currency_unit(currency)
+        
         # Generate wallet privkey if not provided
         if wallet_privkey is None:
             wallet_privkey = self._generate_privkey()
@@ -141,6 +141,23 @@ class Wallet:
         # Rate limiting for relay operations
         self._last_relay_operation = 0.0
         self._min_relay_interval = 1.0  # Minimum 1 second between operations
+
+    def _validate_currency_unit(self, unit: CurrencyUnit) -> None:
+        """Validate currency unit is supported per NUT-01.
+        
+        Args:
+            unit: Currency unit to validate
+            
+        Raises:
+            ValueError: If currency unit is not supported
+        """
+        # Type checking ensures unit is valid CurrencyUnit at compile time
+        # This method can be extended for runtime validation if needed
+        if unit not in [
+            "btc", "sat", "msat", "usd", "eur", "gbp", "jpy", 
+            "auth", "usdt", "usdc", "dai"
+        ]:
+            raise ValueError(f"Unsupported currency unit: {unit}")
 
     # ───────────────────────── Crypto Helpers ─────────────────────────────────
 
@@ -2053,7 +2070,7 @@ class Wallet:
         nsec: str,
         *,
         mint_urls: list[str] | None = None,
-        currency: Literal["sat", "msat", "usd"] = "sat",
+        currency: CurrencyUnit = "sat",
         wallet_privkey: str | None = None,
         relays: list[str] | None = None,
         auto_init: bool = True,
@@ -2171,7 +2188,7 @@ class TempWallet(Wallet):
         self,
         *,
         mint_urls: list[str] | None = None,
-        currency: Literal["sat", "msat", "usd"] = "sat",
+        currency: CurrencyUnit = "sat",
         wallet_privkey: str | None = None,
         relays: list[str] | None = None,
     ) -> None:
@@ -2225,7 +2242,7 @@ class TempWallet(Wallet):
         cls,
         *,
         mint_urls: list[str] | None = None,
-        currency: Literal["sat", "msat", "usd"] = "sat",
+        currency: CurrencyUnit = "sat",
         wallet_privkey: str | None = None,
         relays: list[str] | None = None,
         auto_init: bool = True,
