@@ -478,3 +478,122 @@ class Mint:
         return cast(
             PostRestoreResponse, await self._request("POST", "/v1/restore", json=body)
         )
+
+    # ───────────────────────── Keyset Validation ─────────────────────────────────
+
+    def validate_keyset(self, keyset: dict) -> bool:
+        """Validate keyset structure according to NUT-02 specification.
+        
+        Args:
+            keyset: Keyset dictionary to validate
+            
+        Returns:
+            True if keyset is valid, False otherwise
+            
+        Example:
+            keyset = {"id": "00a1b2c3d4e5f6g7", "unit": "sat", "active": True}
+            is_valid = mint.validate_keyset(keyset)
+        """
+        # Check required fields
+        required_fields = ["id", "unit", "active"]
+        for field in required_fields:
+            if field not in keyset:
+                return False
+        
+        # Validate keyset ID format (hex string, 16 characters)
+        keyset_id = keyset["id"]
+        if not isinstance(keyset_id, str) or len(keyset_id) != 16:
+            return False
+        
+        try:
+            # Verify it's valid hex
+            int(keyset_id, 16)
+        except ValueError:
+            return False
+        
+        # Validate unit
+        valid_units = ["sat", "msat", "usd", "eur", "btc"]  # Common units
+        if keyset["unit"] not in valid_units:
+            return False
+        
+        # Validate active flag
+        if not isinstance(keyset["active"], bool):
+            return False
+        
+        # Validate fee structure if present
+        if "input_fee_ppk" in keyset:
+            fee_value = keyset["input_fee_ppk"]
+            try:
+                fee_int = int(fee_value)
+                if fee_int < 0:
+                    return False
+            except (ValueError, TypeError):
+                return False
+        
+        # Validate keys structure if present
+        if "keys" in keyset:
+            keys = keyset["keys"]
+            if not isinstance(keys, dict):
+                return False
+            
+            # Each key should map amount string to pubkey hex string
+            for amount_str, pubkey_hex in keys.items():
+                try:
+                    # Amount should be parseable as positive integer
+                    amount = int(amount_str)
+                    if amount <= 0:
+                        return False
+                except ValueError:
+                    return False
+                
+                # Pubkey should be valid hex string (33 bytes = 66 hex chars)
+                if not isinstance(pubkey_hex, str) or len(pubkey_hex) != 66:
+                    return False
+                
+                try:
+                    int(pubkey_hex, 16)
+                except ValueError:
+                    return False
+        
+        return True
+
+    def validate_keysets_response(self, response: dict) -> bool:
+        """Validate a complete keysets response structure.
+        
+        Args:
+            response: Response dictionary from /v1/keysets endpoint
+            
+        Returns:
+            True if response is valid, False otherwise
+        """
+        if "keysets" not in response:
+            return False
+        
+        keysets = response["keysets"]
+        if not isinstance(keysets, list):
+            return False
+        
+        # Validate each keyset
+        for keyset in keysets:
+            if not isinstance(keyset, dict):
+                return False
+            if not self.validate_keyset(keyset):
+                return False
+        
+        return True
+
+    async def get_validated_keysets(self) -> KeysetsResponse:
+        """Get keysets with validation according to NUT-02.
+        
+        Returns:
+            Validated keysets response
+            
+        Raises:
+            MintError: If response is invalid or validation fails
+        """
+        response = await self.get_keysets()
+        
+        if not self.validate_keysets_response(dict(response)):
+            raise MintError("Invalid keysets response from mint")
+        
+        return response

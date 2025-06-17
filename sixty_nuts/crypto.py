@@ -500,3 +500,51 @@ class NIP44Encrypt:
         plaintext_bytes = NIP44Encrypt.unpad(padded_plaintext)
 
         return plaintext_bytes.decode("utf-8")
+
+
+def derive_keyset_id(keys: dict[str, str], version: int = 0) -> str:
+    """Derive keyset ID according to NUT-02 specification.
+    
+    Args:
+        keys: Dictionary mapping amount strings to public key hex strings
+        version: Version byte for keyset ID format (default: 0)
+        
+    Returns:
+        Hex-encoded keyset ID (16 characters: 1 version byte + 7 hash bytes)
+        
+    Example:
+        keys = {"1": "02abc...", "2": "02def...", "4": "02ghi..."}
+        keyset_id = derive_keyset_id(keys)  # Returns "00a1b2c3d4e5f6g7"
+    """
+    # Sort keys by amount (as integers) for deterministic ordering
+    sorted_keys = sorted(keys.items(), key=lambda x: int(x[0]))
+    
+    # Concatenate amount and public key for each denomination
+    key_concat = "".join(f"{amount}{pubkey}" for amount, pubkey in sorted_keys)
+    
+    # Hash the concatenated string
+    hash_bytes = hashlib.sha256(key_concat.encode()).digest()
+    
+    # Version byte (1 byte) + first 7 bytes of hash = 8 bytes total
+    keyset_id_bytes = bytes([version]) + hash_bytes[:7]
+    
+    return keyset_id_bytes.hex()
+
+
+def validate_keyset_id(keyset_id: str, keys: dict[str, str], version: int = 0) -> bool:
+    """Validate that a keyset ID matches the expected derivation from keys.
+    
+    Args:
+        keyset_id: Hex-encoded keyset ID to validate
+        keys: Dictionary of amount -> public key mappings
+        version: Expected version byte
+        
+    Returns:
+        True if keyset ID is valid for the given keys
+    """
+    try:
+        # Derive the expected keyset ID
+        expected_id = derive_keyset_id(keys, version)
+        return keyset_id.lower() == expected_id.lower()
+    except Exception:
+        return False
