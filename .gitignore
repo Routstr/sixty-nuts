@@ -12,3 +12,4 @@ wheels/
 # testing
 .cashu
 .pypirc
+proof_backups/
