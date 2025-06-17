@@ -13,7 +13,7 @@ import asyncio
 import httpx
 from coincurve import PrivateKey, PublicKey
 
-from .mint import Mint, Proof, BlindedMessage
+from .mint import Mint, ProofComplete as Proof, BlindedMessage
 from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
     blind_message,
@@ -217,18 +217,16 @@ class Wallet:
 
     def _get_pubkey(self, privkey: PrivateKey | None = None) -> str:
         """Get hex public key from private key (defaults to main nsec)."""
-        if privkey is None:
-            privkey = self._privkey
+        effective_privkey = privkey if privkey is not None else self._privkey
         # Nostr uses x-only public keys (32 bytes, without the prefix byte)
-        compressed_pubkey = privkey.public_key.format(compressed=True)
+        compressed_pubkey = effective_privkey.public_key.format(compressed=True)
         x_only_pubkey = compressed_pubkey[1:]  # Remove the prefix byte
         return x_only_pubkey.hex()
 
     def _get_pubkey_compressed(self, privkey: PrivateKey | None = None) -> str:
         """Get full compressed hex public key for encryption (33 bytes)."""
-        if privkey is None:
-            privkey = self._privkey
-        return privkey.public_key.format(compressed=True).hex()
+        effective_privkey = privkey if privkey is not None else self._privkey
+        return effective_privkey.public_key.format(compressed=True).hex()
 
     def _sign_event(self, event: dict) -> dict:
         """Sign a Nostr event with the user's private key."""
