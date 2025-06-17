@@ -1,26 +1,27 @@
 from __future__ import annotations
 
-from enum import IntEnum
-from typing import Literal, TypedDict
+import asyncio
 import base64
 import hashlib
 import json
+import math
 import secrets
 import time
 from dataclasses import dataclass
-import asyncio
+from enum import IntEnum
+from typing import Literal, TypedDict
 
 import httpx
 from coincurve import PrivateKey, PublicKey
 
-from .mint import Mint, Proof, BlindedMessage
-from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
     blind_message,
     unblind_signature,
     NIP44Encrypt,
     hash_to_curve,
 )
+from .mint import Mint, BlindedMessage, Proof, BlindedSignature
+from .relay import NostrRelay, NostrEvent, RelayError
 
 try:
     from bech32 import bech32_decode, convertbits  # type: ignore
@@ -94,47 +95,58 @@ class Wallet:
         wallet_privkey: str | None = None,  # separate privkey for P2PK ecash (NIP-61)
         relays: list[str] | None = None,  # nostr relays to use
     ) -> None:
-        self.nsec = nsec
-        self._privkey = self._decode_nsec(nsec)
-        self.mint_urls: list[str] = mint_urls or ["https://mint.minibits.cash/Bitcoin"]
-        self.currency = currency
-        # Generate wallet privkey if not provided
-        if wallet_privkey is None:
-            wallet_privkey = self._generate_privkey()
-        self.wallet_privkey = wallet_privkey
-        self._wallet_privkey_obj = PrivateKey(bytes.fromhex(wallet_privkey))
+        """Initialize the wallet.
 
-        self.relays: list[str] = relays or [
+        Args:
+            nsec: nostr private key (nsec format or hex)
+            mint_urls: list of Cashu mint URLs to use (defaults to testnut)
+            currency: currency unit for operations (sat, msat, or usd)
+            wallet_privkey: optional separate private key for P2PK operations
+            relays: list of nostr relay URLs (defaults to common relays)
+        """
+        # Nostr identity
+        self.nsec = nsec
+        self.privkey = self._decode_nsec(nsec)
+        self.pubkey = self.privkey.public_key.format(compressed=True).hex()
+        self.pubkey_uncompressed = self.privkey.public_key.format(compressed=False).hex()
+
+        # Wallet configuration
+        self.mint_urls = mint_urls or ["https://testnut.cashu.space"]
+        self.currency = currency
+        self.wallet_privkey = wallet_privkey
+
+        # Relays for NIP-60
+        self.relays = relays or [
+            "wss://relay.primal.net",
+            "wss://nos.lol",
             "wss://relay.damus.io",
             "wss://relay.nostr.band",
-            "wss://nos.lol",
-            "wss://nostr.wine",
-            "wss://relay.snort.social",
-            "wss://nostr.mom",
+            "wss://nostr-pub.wellorder.net",
         ]
 
-        # Mint and relay instances
+        # HTTP clients
+        self.mint_client = httpx.AsyncClient(timeout=30.0)
         self.mints: dict[str, Mint] = {}
+
+        # Relay connections and caching
         self.relay_instances: list[NostrRelay] = []
+        self.proof_state_cache: dict[str, str] = {}  # proof_id -> state
 
-        # Track minted quotes to prevent double-minting
-        self._minted_quotes: set[str] = set()
-
-        # Shared HTTP client reused by all Mint objects
-        self.mint_client = httpx.AsyncClient()
-
-        # Cache for proof validation results to prevent re-checking spent proofs
-        self._proof_state_cache: dict[
-            str, dict[str, str]
-        ] = {}  # proof_id -> {state, timestamp}
-        self._cache_expiry = 300  # 5 minutes
-
-        # Track known spent proofs to avoid re-validation
-        self._known_spent_proofs: set[str] = set()
-
-        # Rate limiting for relay operations
-        self._last_relay_operation = 0.0
-        self._min_relay_interval = 1.0  # Minimum 1 second between operations
+    def _calculate_blank_outputs_needed(self, fee_reserve: int) -> int:
+        """Calculate number of blank outputs needed for fee returns per NUT-08.
+        
+        According to NUT-08 spec, the number of blank outputs needed is:
+        max(ceil(log2(fee_reserve)), 1) if fee_reserve > 0, else 0
+        
+        Args:
+            fee_reserve: The fee reserve amount in sats
+            
+        Returns:
+            Number of blank outputs needed
+        """
+        if fee_reserve <= 0:
+            return 0
+        return max(math.ceil(math.log2(fee_reserve)), 1)
 
     # ───────────────────────── Crypto Helpers ─────────────────────────────────
 
@@ -220,7 +232,7 @@ class Wallet:
     def _get_pubkey(self, privkey: PrivateKey | None = None) -> str:
         """Get hex public key from private key (defaults to main nsec)."""
         if privkey is None:
-            privkey = self._privkey
+            privkey = self.privkey
         # Nostr uses x-only public keys (32 bytes, without the prefix byte)
         compressed_pubkey = privkey.public_key.format(compressed=True)
         x_only_pubkey = compressed_pubkey[1:]  # Remove the prefix byte
@@ -229,7 +241,7 @@ class Wallet:
     def _get_pubkey_compressed(self, privkey: PrivateKey | None = None) -> str:
         """Get full compressed hex public key for encryption (33 bytes)."""
         if privkey is None:
-            privkey = self._privkey
+            privkey = self.privkey
         return privkey.public_key.format(compressed=True).hex()
 
     def _sign_event(self, event: dict) -> dict:
@@ -240,7 +252,7 @@ class Wallet:
         event["id"] = self._compute_event_id(event)
 
         # Sign the event
-        sig = self._privkey.sign_schnorr(bytes.fromhex(event["id"]))
+        sig = self.privkey.sign_schnorr(bytes.fromhex(event["id"]))
         event["sig"] = sig.hex()
 
         return event
@@ -271,14 +283,14 @@ class Wallet:
         if recipient_pubkey is None:
             recipient_pubkey = self._get_pubkey_compressed()
 
-        return NIP44Encrypt.encrypt(plaintext, self._privkey, recipient_pubkey)
+        return NIP44Encrypt.encrypt(plaintext, self.privkey, recipient_pubkey)
 
     def _nip44_decrypt(self, ciphertext: str, sender_pubkey: str | None = None) -> str:
         """Decrypt content using NIP-44 v2."""
         if sender_pubkey is None:
             sender_pubkey = self._get_pubkey_compressed()
 
-        return NIP44Encrypt.decrypt(ciphertext, self._privkey, sender_pubkey)
+        return NIP44Encrypt.decrypt(ciphertext, self.privkey, sender_pubkey)
 
     def _create_event(
         self,
@@ -573,8 +585,8 @@ class Wallet:
 
     def _is_proof_state_cached(self, proof_id: str) -> tuple[bool, str | None]:
         """Check if proof state is cached and still valid."""
-        if proof_id in self._proof_state_cache:
-            cache_entry = self._proof_state_cache[proof_id]
+        if proof_id in self.proof_state_cache:
+            cache_entry = self.proof_state_cache[proof_id]
             timestamp = float(cache_entry.get("timestamp", 0))
             if time.time() - timestamp < self._cache_expiry:
                 return True, cache_entry.get("state")
@@ -582,7 +594,7 @@ class Wallet:
 
     def _cache_proof_state(self, proof_id: str, state: str) -> None:
         """Cache proof state with timestamp."""
-        self._proof_state_cache[proof_id] = {
+        self.proof_state_cache[proof_id] = {
             "state": state,
             "timestamp": str(time.time()),
         }
@@ -593,7 +605,7 @@ class Wallet:
 
     def clear_spent_proof_cache(self) -> None:
         """Clear the spent proof cache to prevent memory growth."""
-        self._proof_state_cache.clear()
+        self.proof_state_cache.clear()
         self._known_spent_proofs.clear()
 
     async def _validate_proofs_with_cache(
@@ -1626,7 +1638,7 @@ class Wallet:
         change_blinding_factors: list[str] = []
 
         if change_amount > 0:
-            # Create blinded messages for change
+            # Create blinded messages for wallet change
             remaining = change_amount
             keyset_id = selected_proofs[0]["id"]
 
@@ -1645,11 +1657,40 @@ class Wallet:
                     change_blinding_factors.append(r_hex)
                     remaining -= denom
 
-        # Execute melt
+        # NUT-08: Calculate blank outputs needed for Lightning fee returns
+        fee_reserve = melt_quote.get("fee_reserve", 0)
+        num_blank_outputs = self._calculate_blank_outputs_needed(fee_reserve)
+        
+        # Create blank outputs for potential Lightning fee returns
+        blank_outputs: list[BlindedMessage] = []
+        blank_secrets: list[str] = []
+        blank_blinding_factors: list[str] = []
+        
+        if num_blank_outputs > 0:
+            # Use the mint's currently active keyset for blank outputs
+            keys_resp_active = await mint.get_keys()
+            keysets_active = keys_resp_active.get("keysets", [])
+            keyset_id_active = keysets_active[0]["id"] if keysets_active else selected_proofs[0]["id"]
+            
+            for _ in range(num_blank_outputs):
+                # Create blank outputs with amount 1 (value will be assigned by mint)
+                secret, r_hex, blinded_msg = self._create_blinded_message(
+                    1, keyset_id_active  # Amount is ignored by mint per NUT-08
+                )
+                blank_outputs.append(blinded_msg)
+                blank_secrets.append(secret)
+                blank_blinding_factors.append(r_hex)
+
+        # Combine wallet change outputs with blank outputs for fee returns
+        all_outputs = change_outputs + blank_outputs
+        all_secrets = change_secrets + blank_secrets
+        all_blinding_factors = change_blinding_factors + blank_blinding_factors
+
+        # Execute melt with both change outputs and blank outputs
         melt_resp = await mint.melt(
             quote=quote_id,
             inputs=mint_proofs,
-            outputs=change_outputs if change_outputs else None,
+            outputs=all_outputs if all_outputs else None,
         )
 
         # Get mint public key for unblinding change
@@ -1666,38 +1707,82 @@ class Wallet:
         # Delete old token events
         old_token_ids = list(events_to_delete)
 
-        # Create new token event for change
+        # Process returned change from melt response
         if melt_resp.get("change") and mint_keys:
             change_proofs: list[ProofDict] = []
-            for i, sig in enumerate(melt_resp["change"]):
-                # Get the public key for this amount
-                amount = sig["amount"]
-                mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
-                if not mint_pubkey:
-                    raise WalletError(
-                        f"Could not find mint public key for amount {amount}"
-                    )
+            returned_signatures = melt_resp["change"]
+            
+            # According to NUT-08, the mint returns signatures in the same order as outputs
+            # but only for non-zero amounts. We need to map them back correctly.
+            num_wallet_change = len(change_outputs)
+            num_blank_outputs_sent = len(blank_outputs)
+            
+            # Process wallet change signatures (first part of returned signatures)
+            for i, sig in enumerate(returned_signatures[:num_wallet_change]):
+                if i < len(change_blinding_factors):
+                    # Get the public key for this amount
+                    amount = sig["amount"]
+                    mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                    if not mint_pubkey:
+                        raise WalletError(
+                            f"Could not find mint public key for amount {amount}"
+                        )
 
-                # Unblind the signature
-                C_ = PublicKey(bytes.fromhex(sig["C_"]))
-                r = bytes.fromhex(change_blinding_factors[i])
-                C = unblind_signature(C_, r, mint_pubkey)
+                    # Unblind the signature
+                    C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                    r = bytes.fromhex(change_blinding_factors[i])
+                    C = unblind_signature(C_, r, mint_pubkey)
 
-                change_proofs.append(
-                    ProofDict(
-                        id=sig["id"],
-                        amount=sig["amount"],
-                        secret=change_secrets[i],
-                        C=C.format(compressed=True).hex(),
-                        mint=melt_mint_url,
+                    change_proofs.append(
+                        ProofDict(
+                            id=sig["id"],
+                            amount=sig["amount"],
+                            secret=change_secrets[i],
+                            C=C.format(compressed=True).hex(),
+                            mint=melt_mint_url,
+                        )
                     )
+            
+            # Process Lightning fee return signatures (remaining signatures)
+            # These correspond to blank outputs that had non-zero values assigned
+            fee_return_signatures = returned_signatures[num_wallet_change:]
+            blank_output_index = 0
+            
+            for sig in fee_return_signatures:
+                # Find the next blank output that would correspond to this signature
+                while blank_output_index < num_blank_outputs_sent:
+                    amount = sig["amount"]
+                    mint_pubkey = self._get_mint_pubkey_for_amount(mint_keys, amount)
+                    if not mint_pubkey:
+                        raise WalletError(
+                            f"Could not find mint public key for amount {amount}"
+                        )
+
+                    # Unblind the signature using the corresponding blank output's blinding factor
+                    C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                    r = bytes.fromhex(blank_blinding_factors[blank_output_index])
+                    C = unblind_signature(C_, r, mint_pubkey)
+
+                    change_proofs.append(
+                        ProofDict(
+                            id=sig["id"],
+                            amount=sig["amount"],
+                            secret=blank_secrets[blank_output_index],
+                            C=C.format(compressed=True).hex(),
+                            mint=melt_mint_url,
+                        )
+                    )
+                    blank_output_index += 1
+                    break
+
+            if change_proofs:
+                token_event_id = await self.publish_token_event(
+                    change_proofs,
+                    deleted_token_ids=old_token_ids,
                 )
-
-            token_event_id = await self.publish_token_event(
-                change_proofs,
-                deleted_token_ids=old_token_ids,
-            )
-            created_ids = [token_event_id]
+                created_ids = [token_event_id]
+            else:
+                created_ids = []
         else:
             created_ids = []
 
