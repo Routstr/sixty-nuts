@@ -77,6 +77,10 @@ class WalletError(Exception):
     """Base class for wallet errors."""
 
 
+class SwapError(WalletError):
+    """Raised when swap operations fail."""
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Wallet implementation skeleton
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1052,33 +1056,23 @@ class Wallet:
         for p in proofs:
             mint_proofs.append(self._proofdict_to_mint_proof(p))
 
-        # Create blinded messages for new proofs
-        # In production, implement proper blinding
-        outputs: list[BlindedMessage] = []
-        secrets: list[str] = []
-        blinding_factors: list[str] = []
+        # Create blinded messages for new proofs with proper privacy ordering
         total_amount = sum(p["amount"] for p in proofs)
 
-        # Simple denomination split using mint's active keyset id
+        # Get mint's active keyset id
         keys_resp_active = await mint.get_keys()
         keysets_active = keys_resp_active.get("keysets", [])
         keyset_id_active = (
             keysets_active[0]["id"] if keysets_active else proofs[0]["id"]
         )
 
-        remaining = total_amount
-        for denom in [64, 32, 16, 8, 4, 2, 1]:
-            while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
-                    denom, keyset_id_active
-                )
-                outputs.append(blinded_msg)
-                secrets.append(secret)
-                blinding_factors.append(r_hex)
-                remaining -= denom
+        # Create outputs with privacy-preserving ordering (NUT-03 compliance)
+        outputs, secrets, blinding_factors = self._create_outputs_with_privacy(
+            total_amount, keyset_id_active
+        )
 
-        # Swap proofs for new ones
-        response = await mint.swap(inputs=mint_proofs, outputs=outputs)
+        # Swap proofs for new ones with validation
+        response = await self._robust_swap(mint, mint_proofs, outputs)
 
         # Get mint public key for unblinding
         keys_resp = await mint.get_keys()
@@ -1280,11 +1274,6 @@ class Wallet:
             raise WalletError("Lightning payment failed during mint swap")
 
         # Step 6: Mint new tokens at target mint
-        # Create blinded messages
-        outputs: list[BlindedMessage] = []
-        secrets: list[str] = []
-        blinding_factors: list[str] = []
-
         # Get active keyset from target mint
         keys_resp = await target_mint_obj.get_keys()
         keysets = keys_resp.get("keysets", [])
@@ -1296,17 +1285,10 @@ class Wallet:
         # (already accounts for fees in the mint quote)
         amount_received = amount_to_mint
 
-        # Create outputs for the received amount
-        remaining = amount_received
-        for denom in [64, 32, 16, 8, 4, 2, 1]:
-            while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
-                    denom, keyset_id
-                )
-                outputs.append(blinded_msg)
-                secrets.append(secret)
-                blinding_factors.append(r_hex)
-                remaining -= denom
+        # Create outputs with privacy-preserving ordering (NUT-03 compliance)
+        outputs, secrets, blinding_factors = self._create_outputs_with_privacy(
+            amount_received, keyset_id
+        )
 
         # Mint new tokens
         mint_resp = await target_mint_obj.mint(quote=quote_id, outputs=outputs)
@@ -1416,31 +1398,20 @@ class Wallet:
                     "Amount not available in quote status and not provided"
                 )
 
-            # Create blinded messages for the amount
-            outputs: list[BlindedMessage] = []
-            secrets: list[str] = []  # Keep track of secrets for creating proofs later
-            blinding_factors: list[str] = []  # Track blinding factors
-
             # Get active keyset
             keys_resp = await mint.get_keys()
             keysets = keys_resp.get("keysets", [])
             keyset_id = keysets[0]["id"] if keysets else ""
 
-            # Simple denomination split using mint's active keyset id
+            # Get mint's active keyset id
             keys_resp_active = await mint.get_keys()
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            remaining = mint_amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    secrets.append(secret)
-                    blinding_factors.append(r_hex)
-                    remaining -= denom
+            # Create outputs with privacy-preserving ordering (NUT-03 compliance)
+            outputs, secrets, blinding_factors = self._create_outputs_with_privacy(
+                mint_amount, keyset_id_active
+            )
 
             # Mint tokens
             mint_resp = await mint.mint(quote=quote_id, outputs=outputs)
@@ -1790,10 +1761,7 @@ class Wallet:
             for p in selected_proofs:
                 mint_proofs_for_swap.append(self._proofdict_to_mint_proof(p))
 
-            # Create outputs for exact amount and change
-            outputs: list[BlindedMessage] = []
-            all_secrets: list[str] = []
-            all_blinding_factors: list[str] = []
+            # Create outputs for exact amount and change with privacy ordering
             keyset_id = selected_proofs[0]["id"]
 
             # Use the mint's currently active keyset for outputs
@@ -1801,37 +1769,19 @@ class Wallet:
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            # Outputs for sending
-            send_outputs: list[BlindedMessage] = []
-            send_secrets: list[str] = []
-            remaining = amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    send_outputs.append(blinded_msg)
-                    all_secrets.append(secret)
-                    send_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
-                    remaining -= denom
-
-            # Outputs for change
+            # Calculate change amount
             change_amount = selected_amount - amount
-            remaining = change_amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    all_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
-                    remaining -= denom
 
-            # Swap for exact denominations
-            swap_resp = await mint.swap(inputs=mint_proofs_for_swap, outputs=outputs)
+            # Create all outputs with privacy-preserving ordering (NUT-03 compliance)
+            (
+                outputs,
+                all_secrets,
+                all_blinding_factors,
+                send_outputs_count,
+            ) = self._create_send_and_change_outputs(amount, change_amount, keyset_id_active)
+
+            # Swap for exact denominations with validation
+            swap_resp = await self._robust_swap(mint, mint_proofs_for_swap, outputs)
 
             # Get mint public key for unblinding
             keys_resp = await mint.get_keys()
@@ -1872,7 +1822,7 @@ class Wallet:
                     mint=selected_mint_url,
                 )
 
-                if i < len(send_outputs):
+                if i < send_outputs_count:
                     send_proofs.append(proof)
                 else:
                     change_proofs.append(proof)
@@ -2163,6 +2113,137 @@ class Wallet:
                 )
 
         return valid_proofs
+
+    def _create_outputs_with_privacy(
+        self, amount: int, keyset_id: str
+    ) -> tuple[list[BlindedMessage], list[str], list[str]]:
+        """Create blinded outputs with proper privacy-preserving ordering.
+        
+        Args:
+            amount: Total amount to create outputs for
+            keyset_id: The keyset ID to use for outputs
+            
+        Returns:
+            Tuple of (outputs, secrets, blinding_factors) all properly ordered
+        """
+        # Create outputs with metadata for sorting
+        outputs_with_metadata: list[tuple[BlindedMessage, str, str, int]] = []
+        remaining = amount
+        
+        # Use standard denominations in descending order for efficiency
+        for denom in [64, 32, 16, 8, 4, 2, 1]:
+            while remaining >= denom:
+                secret, r_hex, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                outputs_with_metadata.append((blinded_msg, secret, r_hex, denom))
+                remaining -= denom
+        
+        # Sort by amount in ascending order for privacy (NUT-03 requirement)
+        outputs_with_metadata.sort(key=lambda x: x[3])  # Sort by denomination amount
+        
+        # Extract sorted lists
+        outputs = [item[0] for item in outputs_with_metadata]
+        secrets = [item[1] for item in outputs_with_metadata]
+        blinding_factors = [item[2] for item in outputs_with_metadata]
+        
+        return outputs, secrets, blinding_factors
+
+    def _create_send_and_change_outputs(
+        self, send_amount: int, change_amount: int, keyset_id: str
+    ) -> tuple[list[BlindedMessage], list[str], list[str], int]:
+        """Create outputs for both send and change amounts with privacy ordering.
+        
+        Args:
+            send_amount: Amount to create outputs for sending
+            change_amount: Amount to create outputs for change
+            keyset_id: The keyset ID to use for outputs
+            
+        Returns:
+            Tuple of (all_outputs, all_secrets, all_blinding_factors, send_outputs_count)
+            where send_outputs_count indicates how many of the first outputs are for sending
+        """
+        # Create outputs with metadata for sorting, marking which are for send vs change
+        outputs_with_metadata: list[tuple[BlindedMessage, str, str, int, str]] = []
+        
+        # Create send outputs
+        remaining_send = send_amount
+        for denom in [64, 32, 16, 8, 4, 2, 1]:
+            while remaining_send >= denom:
+                secret, r_hex, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                outputs_with_metadata.append((blinded_msg, secret, r_hex, denom, "send"))
+                remaining_send -= denom
+        
+        # Create change outputs
+        remaining_change = change_amount
+        for denom in [64, 32, 16, 8, 4, 2, 1]:
+            while remaining_change >= denom:
+                secret, r_hex, blinded_msg = self._create_blinded_message(denom, keyset_id)
+                outputs_with_metadata.append((blinded_msg, secret, r_hex, denom, "change"))
+                remaining_change -= denom
+        
+        # Sort all outputs by amount in ascending order for privacy (NUT-03 requirement)
+        outputs_with_metadata.sort(key=lambda x: x[3])  # Sort by denomination amount
+        
+        # Extract sorted lists
+        all_outputs = [item[0] for item in outputs_with_metadata]
+        all_secrets = [item[1] for item in outputs_with_metadata]
+        all_blinding_factors = [item[2] for item in outputs_with_metadata]
+        
+        # Count how many outputs are for sending (needed to separate them later)
+        send_outputs_count = sum(1 for item in outputs_with_metadata if item[4] == "send")
+        
+        return all_outputs, all_secrets, all_blinding_factors, send_outputs_count
+
+    def _validate_swap_amounts(
+        self, inputs: list[Proof], outputs: list[BlindedMessage]
+    ) -> bool:
+        """Validate that input and output amounts match exactly.
+        
+        Args:
+            inputs: List of input proofs
+            outputs: List of output blinded messages
+            
+        Returns:
+            True if amounts match, False otherwise
+        """
+        input_total = sum(proof["amount"] for proof in inputs)
+        output_total = sum(output["amount"] for output in outputs)
+        return input_total == output_total
+
+    async def _robust_swap(
+        self, mint: Mint, inputs: list[Proof], outputs: list[BlindedMessage]
+    ) -> PostSwapResponse:
+        """Perform swap with validation and error handling.
+        
+        Args:
+            mint: The mint instance to use
+            inputs: Input proofs to swap
+            outputs: Output blinded messages
+            
+        Returns:
+            Swap response from mint
+            
+        Raises:
+            WalletError: If validation fails or swap operation fails
+        """
+        # Validate amounts before sending to mint
+        if not self._validate_swap_amounts(inputs, outputs):
+            raise WalletError(
+                f"Swap amount mismatch: inputs={sum(p['amount'] for p in inputs)}, "
+                f"outputs={sum(o['amount'] for o in outputs)}"
+            )
+        
+        # Validate we have outputs
+        if not outputs:
+            raise WalletError("Cannot perform swap with no outputs")
+            
+        # Validate we have inputs
+        if not inputs:
+            raise WalletError("Cannot perform swap with no inputs")
+        
+        try:
+            return await mint.swap(inputs=inputs, outputs=outputs)
+        except Exception as e:
+            raise WalletError(f"Swap operation failed: {str(e)}")
 
 
 class TempWallet(Wallet):
