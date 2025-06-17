@@ -124,6 +124,23 @@ Work with multiple mints, check balances per mint, and move funds between mints.
 python multi_mint_operations.py
 ```
 
+### auto_multi_mint_melt.py
+
+Demonstrates the enhanced melt functionality that automatically consolidates proofs from multiple mints when no single mint has enough balance to pay a Lightning invoice.
+
+```bash
+python auto_multi_mint_melt.py
+```
+
+Features:
+- Automatic invoice amount detection
+- Total balance verification across all mints
+- Smart mint selection based on balance
+- Automatic proof consolidation when needed
+- Transparent fee handling
+
+This is particularly useful when your funds are distributed across multiple mints and you need to pay an invoice larger than any single mint's balance.
+
 ## Common Patterns
 
 ### Error Handling
