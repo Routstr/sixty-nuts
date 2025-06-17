@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TypedDict, cast, Any
+from typing import TypedDict, cast, Any, Literal
 
 import httpx
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Type definitions based on OpenAPI spec
+# Type definitions based on NUT-01 and OpenAPI spec
 # ──────────────────────────────────────────────────────────────────────────────
+
+# NUT-01 compliant currency units
+CurrencyUnit = Literal[
+    "btc", "sat", "msat",           # Bitcoin units
+    "usd", "eur", "gbp", "jpy",     # Major fiat (ISO 4217)
+    "auth",                         # Authentication unit
+    # Add more ISO 4217 codes and stablecoin units as needed
+    "usdt", "usdc", "dai",          # Common stablecoins
+]
 
 
 class BlindedMessage(TypedDict):
@@ -54,22 +63,40 @@ class MintInfo(TypedDict, total=False):
     nuts: dict[str, dict[str, Any]]
 
 
-class KeysResponse(TypedDict):
-    """Mint keys response."""
+# NUT-01 compliant keyset definitions
+class Keyset(TypedDict):
+    """Individual keyset per NUT-01 specification."""
+    
+    id: str  # keyset identifier
+    unit: CurrencyUnit  # currency unit
+    keys: dict[str, str]  # amount -> compressed secp256k1 pubkey mapping
 
-    keysets: list[dict[str, str]]  # id -> keys mapping
+
+class KeysResponse(TypedDict):
+    """NUT-01 compliant mint keys response from GET /v1/keys."""
+    
+    keysets: list[Keyset]
+
+
+class KeysetInfo(TypedDict):
+    """Extended keyset information for /v1/keysets endpoint."""
+    
+    id: str
+    unit: CurrencyUnit
+    active: bool
+    input_fee_ppk: int  # input fee in parts per thousand
 
 
 class KeysetsResponse(TypedDict):
-    """Active keysets response."""
+    """Active keysets response from GET /v1/keysets."""
 
-    keysets: list[dict[str, str | int]]  # id, unit, active, input_fee_ppk
+    keysets: list[KeysetInfo]
 
 
 class PostMintQuoteRequest(TypedDict, total=False):
     """Request body for mint quote."""
 
-    unit: str
+    unit: CurrencyUnit
     amount: int
     description: str
     pubkey: str  # for P2PK
@@ -81,7 +108,7 @@ class PostMintQuoteResponse(TypedDict, total=False):
     quote: str  # quote id
     request: str  # bolt11 invoice
     amount: int
-    unit: str
+    unit: CurrencyUnit
     state: str  # "UNPAID", "PAID", "ISSUED"
     expiry: int
     pubkey: str
@@ -105,7 +132,7 @@ class PostMintResponse(TypedDict):
 class PostMeltQuoteRequest(TypedDict, total=False):
     """Request body for melt quote."""
 
-    unit: str
+    unit: CurrencyUnit
     request: str  # bolt11 invoice
     options: dict[str, Any]
 
@@ -115,7 +142,7 @@ class PostMeltQuoteResponse(TypedDict, total=False):
 
     quote: str
     amount: int
-    unit: str
+    unit: CurrencyUnit
     request: str
     fee_reserve: int
     paid: bool
@@ -181,8 +208,12 @@ class MintError(Exception):
     """Raised when mint returns an error response."""
 
 
+class InvalidKeysetError(MintError):
+    """Raised when keyset structure is invalid per NUT-01."""
+
+
 class Mint:
-    """Async HTTP client wrapper for Cashu mint API."""
+    """Async HTTP client wrapper for Cashu mint API with NUT-01 compliance."""
 
     def __init__(self, url: str, *, client: httpx.AsyncClient | None = None) -> None:
         """Initialize mint client.
@@ -221,6 +252,81 @@ class Mint:
 
         return response.json()
 
+    def _validate_keyset(self, keyset: dict[str, Any]) -> bool:
+        """Validate keyset structure per NUT-01 specification.
+        
+        Args:
+            keyset: Keyset dictionary to validate
+            
+        Returns:
+            True if valid, False otherwise
+        """
+        # Check required fields
+        required_fields = ["id", "unit", "keys"]
+        if not all(field in keyset for field in required_fields):
+            return False
+        
+        # Validate keys structure (amount -> pubkey mapping)
+        keys = keyset.get("keys", {})
+        if not isinstance(keys, dict):
+            return False
+            
+        # Validate each public key is compressed secp256k1 format
+        for amount_str, pubkey in keys.items():
+            if not self._is_valid_compressed_pubkey(pubkey):
+                return False
+                
+        return True
+    
+    def _is_valid_compressed_pubkey(self, pubkey: str) -> bool:
+        """Validate that pubkey is a valid compressed secp256k1 public key.
+        
+        Args:
+            pubkey: Hex-encoded public key string
+            
+        Returns:
+            True if valid compressed secp256k1 pubkey
+        """
+        try:
+            # Compressed secp256k1 pubkeys are 33 bytes (66 hex chars)
+            if len(pubkey) != 66:
+                return False
+            
+            # Must start with 02 or 03 for compressed format
+            if not pubkey.startswith(('02', '03')):
+                return False
+                
+            # Verify it's valid hex
+            bytes.fromhex(pubkey)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def _validate_keys_response(self, response: dict[str, Any]) -> KeysResponse:
+        """Validate and cast response to NUT-01 compliant KeysResponse.
+        
+        Args:
+            response: Raw response from mint
+            
+        Returns:
+            Validated KeysResponse
+            
+        Raises:
+            InvalidKeysetError: If response doesn't match NUT-01 specification
+        """
+        if "keysets" not in response:
+            raise InvalidKeysetError("Response missing 'keysets' field")
+            
+        keysets = response["keysets"]
+        if not isinstance(keysets, list):
+            raise InvalidKeysetError("'keysets' must be a list")
+            
+        for i, keyset in enumerate(keysets):
+            if not self._validate_keyset(keyset):
+                raise InvalidKeysetError(f"Invalid keyset at index {i}")
+                
+        return cast(KeysResponse, response)
+
     # ───────────────────────── Info & Keys ─────────────────────────────────
 
     async def get_info(self) -> MintInfo:
@@ -228,9 +334,19 @@ class Mint:
         return cast(MintInfo, await self._request("GET", "/v1/info"))
 
     async def get_keys(self, keyset_id: str | None = None) -> KeysResponse:
-        """Get mint public keys for a keyset (or newest if not specified)."""
+        """Get mint public keys for a keyset (or newest if not specified).
+        
+        Implements NUT-01 specification for mint public key exchange.
+        
+        Args:
+            keyset_id: Optional specific keyset ID to retrieve
+            
+        Returns:
+            NUT-01 compliant KeysResponse with validated structure
+        """
         path = f"/v1/keys/{keyset_id}" if keyset_id else "/v1/keys"
-        return cast(KeysResponse, await self._request("GET", path))
+        response = await self._request("GET", path)
+        return self._validate_keys_response(response)
 
     async def get_keysets(self) -> KeysetsResponse:
         """Get all active keyset IDs."""
@@ -241,7 +357,7 @@ class Mint:
     async def create_mint_quote(
         self,
         *,
-        unit: str,
+        unit: CurrencyUnit,
         amount: int,
         description: str | None = None,
         pubkey: str | None = None,
@@ -292,7 +408,7 @@ class Mint:
     async def create_melt_quote(
         self,
         *,
-        unit: str,
+        unit: CurrencyUnit,
         request: str,
         options: dict[str, Any] | None = None,
     ) -> PostMeltQuoteResponse:
