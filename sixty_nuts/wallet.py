@@ -1541,85 +1541,102 @@ class Wallet:
     # ─────────────────────────────── Send ─────────────────────────────────────
 
     async def melt(self, invoice: str) -> None:
-        """Pay a Lightning invoice using proofs (melt)."""
-        # Get current wallet state with proof validation
-        state = await self.fetch_wallet_state(check_proofs=True)
+        """Pay a Lightning invoice by melting tokens.
 
-        # Group proofs by mint
-        proofs_by_mint: dict[str, list[ProofDict]] = {}
-        for proof in state.proofs:
-            mint_url = proof.get("mint") or (
-                self.mint_urls[0] if self.mint_urls else None
-            )
-            if mint_url:
-                if mint_url not in proofs_by_mint:
-                    proofs_by_mint[mint_url] = []
-                proofs_by_mint[mint_url].append(proof)
+        This will automatically select sufficient proofs, create a melt quote,
+        and execute the payment. Any change will be returned as new proofs.
 
-        # Try each mint to see which can handle the invoice
-        melt_mint_url: str | None = None
+        Args:
+            invoice: BOLT-11 Lightning invoice to pay
+
+        Raises:
+            WalletError: If insufficient balance or payment fails
+
+        Example:
+            await wallet.melt("lnbc100n1...")
+        """
+        # Find a mint that can handle this invoice
+        selected_mint = None
         melt_quote = None
+        melt_mint_url = None
 
-        for mint_url in proofs_by_mint.keys():
+        for mint_url in self.mint_urls:
             try:
                 mint = self._get_mint(mint_url)
-                # Create melt quote
                 quote = await mint.create_melt_quote(
                     unit=self.currency,
                     request=invoice,
                 )
-                melt_mint_url = mint_url
+                selected_mint = mint
                 melt_quote = quote
+                melt_mint_url = mint_url
                 break
             except Exception:
-                # This mint can't handle the invoice, try next
                 continue
 
-        if not melt_mint_url or not melt_quote:
+        if not selected_mint or not melt_quote:
             raise WalletError("No mint can handle this invoice")
 
-        mint = self._get_mint(melt_mint_url)
-        quote_id = melt_quote["quote"]
-        total_needed = melt_quote["amount"] + melt_quote["fee_reserve"]
+        # Calculate total amount needed including lightning fee reserve
+        lightning_fee_reserve = melt_quote.get("fee_reserve", 0)
+        # Ensure lightning_fee_reserve is an integer
+        try:
+            lightning_fee_reserve = int(lightning_fee_reserve)
+        except (ValueError, TypeError):
+            lightning_fee_reserve = 0
+            
+        amount_needed = melt_quote["amount"]
+        try:
+            amount_needed = int(amount_needed)
+        except (ValueError, TypeError):
+            raise WalletError("Invalid amount in melt quote")
 
         # Select proofs to spend from the mint that can handle the invoice
-        mint_proofs_available = proofs_by_mint.get(melt_mint_url, [])
-        selected_proofs: list[ProofDict] = []
-        selected_amount = 0
-        events_to_delete: set[str] = set()
-        proof_to_event_id = state.proof_to_event_id or {}
+        selected_proofs, selected_amount, events_to_delete = await self._select_proofs_for_amount(
+            amount_needed, 
+            mint_filter=melt_mint_url
+        )
 
-        for proof in mint_proofs_available:
-            if selected_amount >= total_needed:
-                break
-            selected_proofs.append(proof)
-            selected_amount += proof["amount"]
-            # Track which event this proof came from
-            proof_id = f"{proof['secret']}:{proof['C']}"
-            if proof_id in proof_to_event_id:
-                events_to_delete.add(proof_to_event_id[proof_id])
+        # Calculate input fees for the selected proofs
+        try:
+            input_fees = await self.calculate_total_input_fees(selected_mint, selected_proofs)
+        except Exception:
+            # Fallback to zero input fees if calculation fails
+            input_fees = 0
 
+        # Total amount needed including both lightning and input fees
+        total_needed = amount_needed + lightning_fee_reserve + input_fees
+
+        # Check if we have enough proofs including fees
         if selected_amount < total_needed:
-            raise WalletError(
-                f"Insufficient balance at mint {melt_mint_url}. Need {total_needed}, have {selected_amount}"
+            # Need to select more proofs to cover input fees
+            selected_proofs, selected_amount, events_to_delete = await self._select_proofs_for_amount(
+                total_needed,
+                mint_filter=melt_mint_url
             )
+            
+            # Recalculate input fees with new proof selection
+            try:
+                input_fees = await self.calculate_total_input_fees(selected_mint, selected_proofs)
+                total_needed = amount_needed + lightning_fee_reserve + input_fees
+            except Exception:
+                input_fees = 0
+                total_needed = amount_needed + lightning_fee_reserve
 
         # Filter proofs to only those with valid keysets for this mint
         selected_proofs = await self._filter_proofs_by_keyset(
-            mint,
+            selected_mint,
             selected_proofs,
             total_needed,
-            operation=f"melt {total_needed} at mint {melt_mint_url}",
+            operation=f"melt {amount_needed} from mint {melt_mint_url}",
         )
-        # Recalculate selected amount after filtering
-        selected_amount = sum(p["amount"] for p in selected_proofs)
 
-        # Convert to mint proof format
+        # Convert to mint proofs
         mint_proofs: list[Proof] = []
         for p in selected_proofs:
             mint_proofs.append(self._proofdict_to_mint_proof(p))
 
-        # Calculate change
+        # Calculate change amount (accounting for all fees)
         change_amount = selected_amount - total_needed
         change_outputs: list[BlindedMessage] = []
         change_secrets: list[str] = []
@@ -1631,7 +1648,7 @@ class Wallet:
             keyset_id = selected_proofs[0]["id"]
 
             # Use the mint's currently active keyset for outputs
-            keys_resp_active = await mint.get_keys()
+            keys_resp_active = await selected_mint.get_keys()
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
@@ -1646,14 +1663,14 @@ class Wallet:
                     remaining -= denom
 
         # Execute melt
-        melt_resp = await mint.melt(
-            quote=quote_id,
+        melt_resp = await selected_mint.melt(
+            quote=melt_quote["quote"],
             inputs=mint_proofs,
             outputs=change_outputs if change_outputs else None,
         )
 
         # Get mint public key for unblinding change
-        keys_resp = await mint.get_keys()
+        keys_resp = await selected_mint.get_keys()
         mint_keys = None
         if change_outputs:
             for ks in keys_resp.get("keysets", []):
@@ -1701,85 +1718,98 @@ class Wallet:
         else:
             created_ids = []
 
-        # Publish spending history
+        # Publish spending history with fee information
         await self.publish_spending_history(
             direction="out",
-            amount=melt_quote["amount"],
+            amount=amount_needed + input_fees,  # Include input fees in spending amount
             created_token_ids=created_ids,
             destroyed_token_ids=old_token_ids,
         )
 
     async def send(self, amount: int) -> str:
-        """Send Cashu tokens of *amount* and return the serialized token."""
-        # Get current wallet state with proof validation
-        state = await self.fetch_wallet_state(check_proofs=True)
+        """Create a Cashu token for sending.
 
-        # Group proofs by mint
+        Selects proofs worth at least the specified amount and returns a 
+        Cashu token string. If the selected proofs are worth more than the 
+        amount, change proofs will be created and stored.
+
+        Args:
+            amount: Amount to send in the wallet's currency unit
+
+        Returns:
+            Cashu token string that can be sent to another wallet
+
+        Raises:
+            WalletError: If insufficient balance or operation fails
+
+        Example:
+            token = await wallet.send(100)
+            print(f"Send this token: {token}")
+        """
+        # Select proofs for the amount
+        selected_proofs, selected_amount, events_to_delete = await self._select_proofs_for_amount(amount)
+
+        if not selected_proofs:
+            raise WalletError(f"Insufficient balance. Need {amount}")
+
+        # Group proofs by mint for fee calculation
         proofs_by_mint: dict[str, list[ProofDict]] = {}
-        for proof in state.proofs:
-            mint_url = proof.get("mint") or (
-                self.mint_urls[0] if self.mint_urls else None
+        for proof in selected_proofs:
+            mint_url = proof.get("mint") or (self.mint_urls[0] if self.mint_urls else "")
+            if mint_url not in proofs_by_mint:
+                proofs_by_mint[mint_url] = []
+            proofs_by_mint[mint_url].append(proof)
+
+        # Calculate input fees for all mints involved
+        total_input_fees = 0
+        for mint_url, mint_proofs in proofs_by_mint.items():
+            try:
+                mint = self._get_mint(mint_url)
+                mint_input_fees = await self.calculate_total_input_fees(mint, mint_proofs)
+                total_input_fees += mint_input_fees
+            except Exception:
+                # Fallback to zero fees if calculation fails
+                continue
+
+        # Check if we need more proofs to cover input fees
+        total_amount_needed = amount + total_input_fees
+        if selected_amount < total_amount_needed:
+            # Need to select more proofs to cover input fees
+            selected_proofs, selected_amount, events_to_delete = await self._select_proofs_for_amount(
+                total_amount_needed
             )
-            if mint_url:
+            
+            # Recalculate input fees with new proof selection
+            proofs_by_mint = {}
+            for proof in selected_proofs:
+                mint_url = proof.get("mint") or (self.mint_urls[0] if self.mint_urls else "")
                 if mint_url not in proofs_by_mint:
                     proofs_by_mint[mint_url] = []
                 proofs_by_mint[mint_url].append(proof)
+            
+            total_input_fees = 0
+            for mint_url, mint_proofs in proofs_by_mint.items():
+                try:
+                    mint = self._get_mint(mint_url)
+                    mint_input_fees = await self.calculate_total_input_fees(mint, mint_proofs)
+                    total_input_fees += mint_input_fees
+                except Exception:
+                    continue
 
-        # Select proofs to send, preferring a single mint if possible
-        selected_proofs: list[ProofDict] = []
-        selected_amount = 0
-        selected_mint_url: str | None = None
-
-        # First try to select from a single mint
-        for mint_url, mint_proofs in proofs_by_mint.items():
-            mint_total = sum(p["amount"] for p in mint_proofs)
-            if mint_total >= amount:
-                # Can satisfy amount from this mint alone
-                for proof in mint_proofs:
-                    if selected_amount < amount:
-                        selected_proofs.append(proof)
-                        selected_amount += proof["amount"]
-                    if selected_amount >= amount:
-                        selected_mint_url = mint_url
-                        break
-                if selected_mint_url:
-                    break
-
-        # If we couldn't satisfy from a single mint, we need to fail
-        # (multi-mint sends would require creating multiple tokens)
-        if not selected_mint_url:
-            raise WalletError(
-                f"Cannot send {amount} from a single mint. Multi-mint sends not yet supported."
-            )
-
-        # Track which events contain selected proofs
-        events_to_delete: set[str] = set()
-        proof_to_event_id = state.proof_to_event_id or {}
-        remaining_proofs: list[ProofDict] = []
-
-        for proof in state.proofs:
-            proof_id = f"{proof['secret']}:{proof['C']}"
-            if proof in selected_proofs:
-                if proof_id in proof_to_event_id:
-                    events_to_delete.add(proof_to_event_id[proof_id])
-            else:
-                remaining_proofs.append(proof)
-
-        if selected_amount < amount:
-            raise WalletError(
-                f"Insufficient balance. Need {amount}, have {state.balance}"
-            )
-
-        # Get the mint client for the selected mint
+        # Determine which mint to use (prefer the one with most proofs)
+        selected_mint_url = max(proofs_by_mint.keys(), key=lambda k: len(proofs_by_mint[k]))
         mint = self._get_mint(selected_mint_url)
 
+        remaining_proofs: list[ProofDict] = []
+
         # If we selected too much, need to split
-        if selected_amount > amount:
+        total_amount_with_fees = amount + total_input_fees
+        if selected_amount > total_amount_with_fees:
             # Filter proofs to only those with valid keysets for this mint
             selected_proofs = await self._filter_proofs_by_keyset(
                 mint,
                 selected_proofs,
-                amount,
+                total_amount_with_fees,
                 operation=f"send {amount} from mint {selected_mint_url}",
             )
             # Recalculate selected amount after filtering
@@ -1801,7 +1831,7 @@ class Wallet:
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            # Outputs for sending
+            # Outputs for sending (amount only, fees are consumed)
             send_outputs: list[BlindedMessage] = []
             send_secrets: list[str] = []
             remaining = amount
@@ -1817,8 +1847,8 @@ class Wallet:
                     all_blinding_factors.append(r_hex)
                     remaining -= denom
 
-            # Outputs for change
-            change_amount = selected_amount - amount
+            # Outputs for change (excluding fees which are consumed)
+            change_amount = selected_amount - total_amount_with_fees
             remaining = change_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
@@ -1899,7 +1929,6 @@ class Wallet:
             # Publish token events for each mint
             created_ids: list[str] = []
             for mint_url, mint_proofs in remaining_by_mint.items():
-                # Need to update publish_token_event to accept mint_url parameter
                 token_event_id = await self.publish_token_event(
                     mint_proofs,
                     deleted_token_ids=deleted_event_ids if not created_ids else None,
@@ -1911,10 +1940,10 @@ class Wallet:
                 await self.delete_token_event(event_id)
             created_ids = []
 
-        # Publish spending history
+        # Publish spending history with fee information
         await self.publish_spending_history(
             direction="out",
-            amount=amount,
+            amount=amount + total_input_fees,  # Include input fees in spending amount
             created_token_ids=created_ids,
             destroyed_token_ids=deleted_event_ids,
         )
@@ -2114,6 +2143,150 @@ class Wallet:
             secret=secret_hex,  # Mint expects hex
             C=proof_dict["C"],
         )
+
+    def calculate_input_fees(self, proofs: list[ProofDict], keyset_info: dict) -> int:
+        """Calculate input fees based on number of proofs and keyset fee rate.
+        
+        Args:
+            proofs: List of proofs being spent
+            keyset_info: Keyset information containing input_fee_ppk
+            
+        Returns:
+            Total input fees in base currency units (e.g., satoshis)
+            
+        Example:
+            With input_fee_ppk=1000 (1 sat per proof) and 3 proofs:
+            fee = (3 * 1000) // 1000 = 3 satoshis
+        """
+        input_fee_ppk = keyset_info.get("input_fee_ppk", 0)
+        
+        # Ensure input_fee_ppk is an integer (could be string from API)
+        try:
+            input_fee_ppk = int(input_fee_ppk)
+        except (ValueError, TypeError):
+            input_fee_ppk = 0
+            
+        if input_fee_ppk == 0:
+            return 0
+        
+        num_proofs = len(proofs)
+        # Fee is calculated as: (number_of_proofs * input_fee_ppk) / 1000
+        # Using integer division to avoid floating point precision issues
+        return (num_proofs * input_fee_ppk) // 1000
+
+    async def calculate_total_input_fees(self, mint: Mint, proofs: list[ProofDict]) -> int:
+        """Calculate total input fees for proofs across different keysets.
+        
+        Args:
+            mint: Mint instance to query keyset information
+            proofs: List of proofs being spent
+            
+        Returns:
+            Total input fees for all proofs
+        """
+        try:
+            # Get keyset information from mint
+            keysets_resp = await mint.get_keysets()
+            keyset_fees = {}
+            
+            # Build mapping of keyset_id -> input_fee_ppk
+            for keyset in keysets_resp["keysets"]:
+                keyset_fees[keyset["id"]] = keyset.get("input_fee_ppk", 0)
+            
+            # Group proofs by keyset and calculate fees
+            total_fee = 0
+            keyset_proof_counts = {}
+            
+            for proof in proofs:
+                keyset_id = proof["id"]
+                if keyset_id not in keyset_proof_counts:
+                    keyset_proof_counts[keyset_id] = 0
+                keyset_proof_counts[keyset_id] += 1
+            
+            # Calculate fees for each keyset
+            for keyset_id, proof_count in keyset_proof_counts.items():
+                fee_rate = keyset_fees.get(keyset_id, 0)
+                # Ensure fee_rate is an integer (could be string from API)
+                try:
+                    fee_rate = int(fee_rate)
+                except (ValueError, TypeError):
+                    fee_rate = 0
+                keyset_fee = (proof_count * fee_rate) // 1000
+                total_fee += keyset_fee
+            
+            return total_fee
+            
+        except Exception:
+            # Fallback to zero fees if keyset info unavailable
+            # This ensures wallet doesn't break when connecting to older mints
+            return 0
+
+    def estimate_transaction_fees(self, 
+                                  input_proofs: list[ProofDict], 
+                                  keyset_info: dict,
+                                  lightning_fee_reserve: int = 0) -> tuple[int, int]:
+        """Estimate total transaction fees including input fees and lightning fees.
+        
+        Args:
+            input_proofs: Proofs being spent as inputs
+            keyset_info: Keyset information for input fee calculation
+            lightning_fee_reserve: Lightning network fee reserve from melt quote
+            
+        Returns:
+            Tuple of (input_fees, total_fees)
+        """
+        input_fees = self.calculate_input_fees(input_proofs, keyset_info)
+        total_fees = input_fees + lightning_fee_reserve
+        
+        return input_fees, total_fees
+
+    async def _select_proofs_for_amount(self, 
+                                        amount: int, 
+                                        mint_filter: str | None = None) -> tuple[list[ProofDict], int, set[str]]:
+        """Select proofs worth at least the specified amount.
+        
+        Args:
+            amount: Minimum amount needed
+            mint_filter: Optional mint URL to filter proofs by
+            
+        Returns:
+            Tuple of (selected_proofs, total_amount, events_to_delete)
+        """
+        # Get current wallet state with proof validation
+        state = await self.fetch_wallet_state(check_proofs=True)
+        
+        # Filter proofs by mint if specified
+        available_proofs = []
+        if mint_filter:
+            for proof in state.proofs:
+                proof_mint = proof.get("mint") or (self.mint_urls[0] if self.mint_urls else "")
+                if proof_mint == mint_filter:
+                    available_proofs.append(proof)
+        else:
+            available_proofs = state.proofs
+        
+        # Sort proofs by amount (ascending) for efficient selection
+        available_proofs.sort(key=lambda p: p["amount"])
+        
+        selected_proofs: list[ProofDict] = []
+        selected_amount = 0
+        events_to_delete: set[str] = set()
+        proof_to_event_id = state.proof_to_event_id or {}
+        
+        # Select proofs until we have enough
+        for proof in available_proofs:
+            if selected_amount >= amount:
+                break
+                
+            selected_proofs.append(proof)
+            selected_amount += proof["amount"]
+            
+            # Track which event this proof came from for deletion
+            proof_id = f"{proof['secret']}:{proof['C']}"
+            if proof_id in proof_to_event_id:
+                events_to_delete.add(proof_to_event_id[proof_id])
+        
+        return selected_proofs, selected_amount, events_to_delete
 
     async def _filter_proofs_by_keyset(
         self,
