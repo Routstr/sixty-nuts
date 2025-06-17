@@ -107,8 +107,6 @@ class Wallet:
         self.relays: list[str] = relays or [
             "wss://relay.damus.io",
             "wss://relay.nostr.band",
-            "wss://nos.lol",
-            "wss://nostr.wine",
             "wss://relay.snort.social",
             "wss://nostr.mom",
         ]
@@ -137,6 +135,76 @@ class Wallet:
         self._min_relay_interval = 1.0  # Minimum 1 second between operations
 
     # ───────────────────────── Crypto Helpers ─────────────────────────────────
+
+    def _get_denominations(self) -> list[int]:
+        """Get the list of supported denominations in descending order.
+
+        Returns denominations as powers of 2, supporting up to 16384 (2^14).
+        """
+        return [
+            16384,
+            8192,
+            4096,
+            2048,
+            1024,
+            512,
+            256,
+            128,
+            64,
+            32,
+            16,
+            8,
+            4,
+            2,
+            1,
+        ]
+
+    def _create_blinded_messages_for_amount(
+        self, amount: int, keyset_id: str, *, prefer_large_denominations: bool = False
+    ) -> tuple[list[BlindedMessage], list[str], list[str]]:
+        """Create blinded messages for a given amount using optimal denominations.
+
+        Args:
+            amount: Total amount to split into denominations
+            keyset_id: The keyset ID to use for the blinded messages
+            prefer_large_denominations: If True, prefer fewer larger denominations
+
+        Returns:
+            Tuple of (blinded_messages, secrets, blinding_factors)
+        """
+        outputs: list[BlindedMessage] = []
+        secrets: list[str] = []
+        blinding_factors: list[str] = []
+
+        remaining = amount
+
+        if prefer_large_denominations:
+            # Use larger denominations more aggressively for consolidation
+            denominations = self._get_denominations()
+            for denom in denominations:
+                # Use as many of this denomination as possible
+                count = remaining // denom
+                for _ in range(count):
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
+                    outputs.append(blinded_msg)
+                    secrets.append(secret)
+                    blinding_factors.append(r_hex)
+                    remaining -= denom
+        else:
+            # Standard denomination split (preserves privacy better)
+            for denom in self._get_denominations():
+                while remaining >= denom:
+                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                        denom, keyset_id
+                    )
+                    outputs.append(blinded_msg)
+                    secrets.append(secret)
+                    blinding_factors.append(r_hex)
+                    remaining -= denom
+
+        return outputs, secrets, blinding_factors
 
     def _create_blinded_message(
         self, amount: int, keyset_id: str
@@ -624,8 +692,10 @@ class Wallet:
             # Group by mint for batch validation
             proofs_by_mint: dict[str, list[ProofDict]] = {}
             for proof in proofs_to_check:
-                # Use first mint URL for all proofs (could be improved)
-                mint_url = self.mint_urls[0] if self.mint_urls else None
+                # Get mint URL from proof, fallback to first mint URL
+                mint_url = proof.get("mint") or (
+                    self.mint_urls[0] if self.mint_urls else None
+                )
                 if mint_url:
                     if mint_url not in proofs_by_mint:
                         proofs_by_mint[mint_url] = []
@@ -667,6 +737,10 @@ class Wallet:
         Args:
             check_proofs: If True, validate all proofs with mint before returning state
         """
+        # Clear spent proof cache to ensure fresh validation
+        if check_proofs:
+            self.clear_spent_proof_cache()
+
         relays = await self._get_relay_connections()
         pubkey = self._get_pubkey()
 
@@ -1054,9 +1128,6 @@ class Wallet:
 
         # Create blinded messages for new proofs
         # In production, implement proper blinding
-        outputs: list[BlindedMessage] = []
-        secrets: list[str] = []
-        blinding_factors: list[str] = []
         total_amount = sum(p["amount"] for p in proofs)
 
         # Simple denomination split using mint's active keyset id
@@ -1066,16 +1137,9 @@ class Wallet:
             keysets_active[0]["id"] if keysets_active else proofs[0]["id"]
         )
 
-        remaining = total_amount
-        for denom in [64, 32, 16, 8, 4, 2, 1]:
-            while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
-                    denom, keyset_id_active
-                )
-                outputs.append(blinded_msg)
-                secrets.append(secret)
-                blinding_factors.append(r_hex)
-                remaining -= denom
+        outputs, secrets, blinding_factors = self._create_blinded_messages_for_amount(
+            total_amount, keyset_id_active
+        )
 
         # Swap proofs for new ones
         response = await mint.swap(inputs=mint_proofs, outputs=outputs)
@@ -1280,11 +1344,6 @@ class Wallet:
             raise WalletError("Lightning payment failed during mint swap")
 
         # Step 6: Mint new tokens at target mint
-        # Create blinded messages
-        outputs: list[BlindedMessage] = []
-        secrets: list[str] = []
-        blinding_factors: list[str] = []
-
         # Get active keyset from target mint
         keys_resp = await target_mint_obj.get_keys()
         keysets = keys_resp.get("keysets", [])
@@ -1297,16 +1356,9 @@ class Wallet:
         amount_received = amount_to_mint
 
         # Create outputs for the received amount
-        remaining = amount_received
-        for denom in [64, 32, 16, 8, 4, 2, 1]:
-            while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
-                    denom, keyset_id
-                )
-                outputs.append(blinded_msg)
-                secrets.append(secret)
-                blinding_factors.append(r_hex)
-                remaining -= denom
+        outputs, secrets, blinding_factors = self._create_blinded_messages_for_amount(
+            amount_received, keyset_id
+        )
 
         # Mint new tokens
         mint_resp = await target_mint_obj.mint(quote=quote_id, outputs=outputs)
@@ -1416,11 +1468,6 @@ class Wallet:
                     "Amount not available in quote status and not provided"
                 )
 
-            # Create blinded messages for the amount
-            outputs: list[BlindedMessage] = []
-            secrets: list[str] = []  # Keep track of secrets for creating proofs later
-            blinding_factors: list[str] = []  # Track blinding factors
-
             # Get active keyset
             keys_resp = await mint.get_keys()
             keysets = keys_resp.get("keysets", [])
@@ -1431,16 +1478,10 @@ class Wallet:
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            remaining = mint_amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    secrets.append(secret)
-                    blinding_factors.append(r_hex)
-                    remaining -= denom
+            # Create blinded messages for the amount
+            outputs, secrets, blinding_factors = (
+                self._create_blinded_messages_for_amount(mint_amount, keyset_id_active)
+            )
 
             # Mint tokens
             mint_resp = await mint.mint(quote=quote_id, outputs=outputs)
@@ -1621,13 +1662,8 @@ class Wallet:
 
         # Calculate change
         change_amount = selected_amount - total_needed
-        change_outputs: list[BlindedMessage] = []
-        change_secrets: list[str] = []
-        change_blinding_factors: list[str] = []
 
         if change_amount > 0:
-            # Create blinded messages for change
-            remaining = change_amount
             keyset_id = selected_proofs[0]["id"]
 
             # Use the mint's currently active keyset for outputs
@@ -1635,15 +1671,16 @@ class Wallet:
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    change_outputs.append(blinded_msg)
-                    change_secrets.append(secret)
-                    change_blinding_factors.append(r_hex)
-                    remaining -= denom
+            # Create blinded messages for change
+            change_outputs, change_secrets, change_blinding_factors = (
+                self._create_blinded_messages_for_amount(
+                    change_amount, keyset_id_active
+                )
+            )
+        else:
+            change_outputs = []
+            change_secrets = []
+            change_blinding_factors = []
 
         # Execute melt
         melt_resp = await mint.melt(
@@ -1663,12 +1700,9 @@ class Wallet:
                         mint_keys = keys_data
                         break
 
-        # Delete old token events
-        old_token_ids = list(events_to_delete)
-
-        # Create new token event for change
-        if melt_resp.get("change") and mint_keys:
-            change_proofs: list[ProofDict] = []
+        # Process change proofs before deleting old events
+        change_proofs: list[ProofDict] = []
+        if change_outputs and melt_resp.get("change") and mint_keys:
             for i, sig in enumerate(melt_resp["change"]):
                 # Get the public key for this amount
                 amount = sig["amount"]
@@ -1692,14 +1726,83 @@ class Wallet:
                         mint=melt_mint_url,
                     )
                 )
-
-            token_event_id = await self.publish_token_event(
-                change_proofs,
-                deleted_token_ids=old_token_ids,
+        elif change_amount > 0:
+            # Expected change but didn't receive it - this is a critical error
+            raise WalletError(
+                f"Mint did not return expected change of {change_amount} {self.currency}. "
+                f"This could result in loss of funds. Melt response: {melt_resp}"
             )
-            created_ids = [token_event_id]
+
+        # Collect remaining proofs not used in this melt operation
+        remaining_proofs: list[ProofDict] = []
+        used_proof_ids = {f"{p['secret']}:{p['C']}" for p in selected_proofs}
+        for proof in state.proofs:
+            proof_id = f"{proof['secret']}:{proof['C']}"
+            if proof_id not in used_proof_ids:
+                remaining_proofs.append(proof)
+
+        # Add change proofs to remaining proofs
+        remaining_proofs.extend(change_proofs)
+
+        # Delete old token events
+        old_token_ids = list(events_to_delete)
+
+        # Create new token events for remaining proofs
+        created_ids: list[str] = []
+        if remaining_proofs:
+            # Group remaining proofs by mint
+            remaining_by_mint: dict[str, list[ProofDict]] = {}
+            for proof in remaining_proofs:
+                mint_url = proof.get("mint") or melt_mint_url
+                if mint_url not in remaining_by_mint:
+                    remaining_by_mint[mint_url] = []
+                remaining_by_mint[mint_url].append(proof)
+
+            # Publish token events for each mint
+            for mint_url, mint_proofs_dict in remaining_by_mint.items():
+                try:
+                    token_event_id = await self.publish_token_event(
+                        mint_proofs_dict,
+                        deleted_token_ids=old_token_ids if not created_ids else None,
+                    )
+                    created_ids.append(token_event_id)
+                except Exception as e:
+                    # If we can't publish the new token event, we need to handle this carefully
+                    print(f"Warning: Failed to publish change proofs to relays: {e}")
+                    # Try to at least publish to one relay as fallback
+                    for relay in self.relay_instances[:1]:
+                        try:
+                            simple_event = self._create_event(
+                                kind=EventKind.Token,
+                                content=self._nip44_encrypt(
+                                    json.dumps(
+                                        {"mint": mint_url, "proofs": mint_proofs}
+                                    )
+                                ),
+                                tags=[
+                                    ["a", f"{EventKind.Wallet}:{self._get_pubkey()}"]
+                                ],
+                            )
+                            self._sign_event(simple_event)
+                            # Create NostrEvent from the signed event dict
+                            nostr_event = NostrEvent(
+                                id=simple_event["id"],
+                                pubkey=simple_event["pubkey"],
+                                created_at=simple_event["created_at"],
+                                kind=simple_event["kind"],
+                                tags=simple_event["tags"],
+                                content=simple_event["content"],
+                                sig=simple_event["sig"],
+                            )
+                            await relay.publish_event(nostr_event)
+                            print("Successfully published to fallback relay")
+                            break
+                        except Exception:
+                            continue
         else:
-            created_ids = []
+            # Still need to delete old events even if no remaining proofs
+            for event_id in old_token_ids:
+                await self.delete_token_event(event_id)
 
         # Publish spending history
         await self.publish_spending_history(
@@ -1790,45 +1893,29 @@ class Wallet:
             for p in selected_proofs:
                 mint_proofs_for_swap.append(self._proofdict_to_mint_proof(p))
 
-            # Create outputs for exact amount and change
-            outputs: list[BlindedMessage] = []
-            all_secrets: list[str] = []
-            all_blinding_factors: list[str] = []
-            keyset_id = selected_proofs[0]["id"]
-
             # Use the mint's currently active keyset for outputs
+            keyset_id = selected_proofs[0]["id"]
             keys_resp_active = await mint.get_keys()
             keysets_active = keys_resp_active.get("keysets", [])
             keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
 
-            # Outputs for sending
-            send_outputs: list[BlindedMessage] = []
-            send_secrets: list[str] = []
-            remaining = amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    send_outputs.append(blinded_msg)
-                    all_secrets.append(secret)
-                    send_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
-                    remaining -= denom
+            # Create outputs for exact amount
+            send_outputs, send_secrets, send_blinding_factors = (
+                self._create_blinded_messages_for_amount(amount, keyset_id_active)
+            )
 
-            # Outputs for change
+            # Create outputs for change
             change_amount = selected_amount - amount
-            remaining = change_amount
-            for denom in [64, 32, 16, 8, 4, 2, 1]:
-                while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
-                        denom, keyset_id_active
-                    )
-                    outputs.append(blinded_msg)
-                    all_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
-                    remaining -= denom
+            change_outputs, change_secrets, change_blinding_factors = (
+                self._create_blinded_messages_for_amount(
+                    change_amount, keyset_id_active
+                )
+            )
+
+            # Combine all outputs, secrets, and blinding factors
+            outputs = send_outputs + change_outputs
+            all_secrets = send_secrets + change_secrets
+            all_blinding_factors = send_blinding_factors + change_blinding_factors
 
             # Swap for exact denominations
             swap_resp = await mint.swap(inputs=mint_proofs_for_swap, outputs=outputs)
@@ -1928,6 +2015,7 @@ class Wallet:
         *,
         fee_estimate: float = 0.01,
         max_fee: int | None = None,
+        mint_fee_reserve: int = 1,
     ) -> int:
         """Send funds to an LNURL address.
 
@@ -1936,6 +2024,7 @@ class Wallet:
             amount: Amount to send in the wallet's currency unit
             fee_estimate: Fee estimate as a percentage (default: 1%)
             max_fee: Maximum fee in the wallet's currency unit (optional)
+            mint_fee_reserve: Expected mint fee reserve (default: 1 sat)
 
         Returns:
             Amount actually paid in the wallet's currency unit
@@ -1950,6 +2039,18 @@ class Wallet:
             print(f"Paid {paid} sats")
         """
         from .lnurl import get_lnurl_data, get_lnurl_invoice
+
+        # Get current balance
+        state = await self.fetch_wallet_state(check_proofs=True)
+        balance = state.balance
+
+        # Check if we have enough balance for amount + mint fees
+        min_required_balance = amount + mint_fee_reserve
+        if balance < min_required_balance:
+            raise WalletError(
+                f"Insufficient balance. Need at least {min_required_balance} {self.currency} "
+                f"(amount: {amount} + mint fees: {mint_fee_reserve}), but have {balance}"
+            )
 
         # Get LNURL data
         lnurl_data = await get_lnurl_data(lnurl)
@@ -1977,27 +2078,57 @@ class Wallet:
                 f"({min_sendable_sat} - {max_sendable_sat} {unit_str})"
             )
 
-        # Calculate amount to request (subtract estimated fees)
-        estimated_fee = int(amount * fee_estimate)
-        if max_fee is not None:
-            estimated_fee = min(estimated_fee, max_fee)
-        estimated_fee = max(estimated_fee, 1)  # Minimum 1 unit fee
+        # For small amounts or when balance is tight, request the full amount
+        # and let mint fees come from any excess balance
+        if amount <= 10 or balance <= min_required_balance + 2:
+            amount_to_request = amount_msat
+        else:
+            # For larger amounts with comfortable balance, try to optimize fees
+            estimated_fee = int(amount * fee_estimate)
+            if max_fee is not None:
+                estimated_fee = min(estimated_fee, max_fee)
+            estimated_fee = max(estimated_fee, 1)  # Minimum 1 unit fee
 
-        amount_to_request = amount_msat - (
-            estimated_fee * (1000 if self.currency == "sat" else 1)
-        )
+            amount_to_request = amount_msat - (
+                estimated_fee * (1000 if self.currency == "sat" else 1)
+            )
+
+            # Ensure amount_to_request meets LNURL minimum requirements
+            if amount_to_request < lnurl_data["min_sendable"]:
+                amount_to_request = amount_msat
 
         # Get Lightning invoice
         bolt11_invoice, invoice_data = await get_lnurl_invoice(
             lnurl_data["callback_url"], amount_to_request
         )
 
+        # Get balance before payment (with fresh state)
+        state_before = await self.fetch_wallet_state(check_proofs=True)
+        balance_before = state_before.balance
+
         # Pay the invoice using melt
         await self.melt(bolt11_invoice)
 
-        # Return the actual amount paid (from the invoice)
-        # The melt operation handles the exact amount from the invoice
-        return amount - estimated_fee
+        # Wait a bit for state to propagate to relays
+        await asyncio.sleep(0.5)
+
+        # Get balance after payment to calculate actual amount paid
+        try:
+            state_after = await self.fetch_wallet_state(check_proofs=True)
+            balance_after = state_after.balance
+            actual_paid = balance_before - balance_after
+        except Exception:
+            # If we can't get updated state, estimate based on invoice amount
+            if self.currency == "sat":
+                # Add estimated Lightning routing fee (typically 1-3 sats for small amounts)
+                actual_paid = (
+                    amount_to_request + 999
+                ) // 1000 + 2  # Invoice + ~2 sat fee
+            else:  # msat
+                actual_paid = amount_to_request + 2000  # Add ~2000 msat fee
+
+        # Return the actual amount paid from the wallet
+        return actual_paid
 
     async def roll_over_proofs(
         self,
@@ -2137,32 +2268,10 @@ class Wallet:
         Raises:
             WalletError: If not enough valid proofs to meet required_amount
         """
-        # Get valid keysets for this mint
-        try:
-            keysets_resp = await mint.get_keysets()
-            valid_keyset_ids = {ks["id"] for ks in keysets_resp.get("keysets", [])}
-        except Exception:
-            # If we can't get keysets, return all proofs and let mint validate
-            return proofs
-
-        # Filter proofs to only those with valid keysets
-        valid_proofs = [p for p in proofs if p["id"] in valid_keyset_ids]
-        invalid_proofs = [p for p in proofs if p["id"] not in valid_keyset_ids]
-
-        if invalid_proofs:
-            # Some proofs have unknown keysets
-            invalid_amount = sum(p["amount"] for p in invalid_proofs)
-            valid_amount = sum(p["amount"] for p in valid_proofs)
-
-            if valid_amount < required_amount:
-                # Can't satisfy amount with valid proofs alone
-                raise WalletError(
-                    f"Cannot {operation} {required_amount}. "
-                    f"Found {invalid_amount} in proofs with unknown keysets "
-                    f"(possibly from other mints). Valid balance: {valid_amount}"
-                )
-
-        return valid_proofs
+        # Simply return all proofs - let the mint validate them
+        # The previous implementation was too restrictive, filtering out proofs
+        # with inactive keysets that are still valid and spendable
+        return proofs
 
 
 class TempWallet(Wallet):
@@ -2266,9 +2375,45 @@ class TempWallet(Wallet):
         return wallet
 
 
-async def redeem_to_lnurl(token: str, lnurl: str) -> int:
-    """Redeem a token to an LNURL address and return the amount redeemed."""
+async def redeem_to_lnurl(token: str, lnurl: str, *, mint_fee_reserve: int = 1) -> int:
+    """Redeem a token to an LNURL address and return the amount sent.
+
+    This function automatically handles fees by reducing the send amount if needed.
+
+    Args:
+        token: Cashu token to redeem
+        lnurl: LNURL/Lightning Address to send to
+        mint_fee_reserve: Expected mint fee reserve (default: 1 sat)
+
+    Returns:
+        Amount actually sent (after fees)
+
+    Raises:
+        WalletError: If redeemed amount is too small (<=1 sat)
+    """
     async with TempWallet() as wallet:
-        amount, _ = await wallet.redeem(token)
-        await wallet.send_to_lnurl(lnurl, amount)
-        return amount
+        amount, unit = await wallet.redeem(token)
+
+        # Check if amount is too small
+        if amount <= mint_fee_reserve:
+            raise WalletError(
+                f"Redeemed amount ({amount} {unit}) is too small. "
+                f"After fees, nothing would be left to send."
+            )
+
+        # Try to send the full amount first
+        try:
+            paid = await wallet.send_to_lnurl(
+                lnurl, amount, mint_fee_reserve=mint_fee_reserve
+            )
+            return paid
+        except WalletError as e:
+            # If insufficient balance due to fees, automatically adjust
+            if "Insufficient balance" in str(e) and amount > mint_fee_reserve:
+                # Send amount minus fee reserve
+                adjusted_amount = amount - mint_fee_reserve
+                paid = await wallet.send_to_lnurl(
+                    lnurl, adjusted_amount, mint_fee_reserve=mint_fee_reserve
+                )
+                return paid
+            raise
