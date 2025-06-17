@@ -1,12 +1,7 @@
-#!/usr/bin/env python3
-"""Example: Validate Cashu tokens before accepting.
-
-Shows how to check if a token is valid, unspent, and from a trusted mint.
-Essential for merchants or services accepting Cashu payments.
-"""
-
 import asyncio
+import os
 import sys
+from dotenv import load_dotenv
 from sixty_nuts.wallet import Wallet, TempWallet
 
 
@@ -112,6 +107,14 @@ async def merchant_accept_flow(token: str, expected_amount: int | None = None):
         "https://legend.lnbits.com/cashu/api/v1/AptDNABNBXv8gpuywhx6NV",
     ]
 
+    # Load dotenv here specifically within the merchant flow if needed
+    # Or ensure it's loaded once at a higher level (e.g., main function)
+    load_dotenv()
+    nsec = os.getenv("NSEC")
+    if not nsec:
+        print("Error: NSEC environment variable not set. Please create a .env file.")
+        return False # Return False to indicate failure
+
     print("🏪 Merchant payment acceptance")
     print("=" * 40)
 
@@ -134,7 +137,7 @@ async def merchant_accept_flow(token: str, expected_amount: int | None = None):
     print(f"\n💳 Accepting payment of {validation['amount']} {validation['unit']}...")
 
     async with Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
+        nsec=nsec,
         mint_urls=TRUSTED_MINTS,
     ) as wallet:
         try:
@@ -190,6 +193,10 @@ async def main():
         print("\nFor batch validation:")
         print("Usage: python validate_token.py batch <token1> <token2> ...")
         return
+
+    # It's better to load dotenv once at the top of the main function
+    # if multiple functions within the file might need it,
+    # but here I put it inside merchant_accept_flow as it's the only one that needs it.
 
     if sys.argv[1] == "merchant":
         # Merchant acceptance flow

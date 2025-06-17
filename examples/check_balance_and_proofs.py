@@ -6,6 +6,8 @@ Useful for debugging and understanding wallet state.
 """
 
 import asyncio
+import os
+from dotenv import load_dotenv
 from sixty_nuts.wallet import Wallet
 
 
@@ -64,9 +66,15 @@ async def check_without_validation(wallet: Wallet):
 
 async def main():
     """Main example."""
+    load_dotenv()
+    nsec = os.getenv("NSEC")
+    if not nsec:
+        print("Error: NSEC environment variable not set. Please create a .env file.")
+        return
+
     # Initialize wallet
     async with Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
+        nsec=nsec,
     ) as wallet:
         # Check with full validation
         await check_wallet_status(wallet)
