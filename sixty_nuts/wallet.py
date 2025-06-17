@@ -13,13 +13,15 @@ import asyncio
 import httpx
 from coincurve import PrivateKey, PublicKey
 
-from .mint import Mint, Proof, BlindedMessage
+from .mint import Mint, ProofComplete as Proof, BlindedMessage
 from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
     blind_message,
     unblind_signature,
     NIP44Encrypt,
     hash_to_curve,
+    BlindingData,
+    create_blinded_message,
 )
 
 try:
@@ -51,6 +53,10 @@ class EventKind(IntEnum):
 
 
 class ProofDict(TypedDict):
+    """Extended proof structure for NIP-60 wallet use.
+    
+    Extends the basic Proof with mint URL tracking for multi-mint support.
+    """
     id: str
     amount: int
     secret: str
@@ -140,11 +146,11 @@ class Wallet:
 
     def _create_blinded_message(
         self, amount: int, keyset_id: str
-    ) -> tuple[str, str, BlindedMessage]:
-        """Create a properly blinded message for the mint.
+    ) -> tuple[str, BlindingData, BlindedMessage]:
+        """Create a properly blinded message for the mint using the updated crypto API.
 
         Returns:
-            Tuple of (secret, blinding_factor_hex, BlindedMessage)
+            Tuple of (secret_base64, blinding_data, blinded_message)
         """
         # Generate random 32-byte secret
         secret_bytes = secrets.token_bytes(32)
@@ -155,25 +161,17 @@ class Wallet:
         # For blinding, use UTF-8 bytes of the hex string (Cashu standard)
         secret_utf8_bytes = secret_hex.encode("utf-8")
 
-        # Blind the message using the UTF-8 encoded hex string
-        B_, r = blind_message(secret_utf8_bytes)
-
-        # Convert to hex for storage
-        B_hex = B_.format(compressed=True).hex()
-        r_hex = r.hex()
+        # Use the new create_blinded_message function
+        blinded_msg, blinding_data = create_blinded_message(
+            amount=amount,
+            keyset_id=keyset_id,
+            secret=secret_utf8_bytes
+        )
 
         # For NIP-60 storage, convert to base64
         secret_base64 = base64.b64encode(secret_bytes).decode("ascii")
 
-        return (
-            secret_base64,  # Store as base64 string in proof (NIP-60 requirement)
-            r_hex,
-            BlindedMessage(
-                amount=amount,
-                id=keyset_id,
-                B_=B_hex,
-            ),
-        )
+        return secret_base64, blinding_data, blinded_msg
 
     def _get_mint_pubkey_for_amount(
         self, keys_data: dict[str, str], amount: int
@@ -219,18 +217,16 @@ class Wallet:
 
     def _get_pubkey(self, privkey: PrivateKey | None = None) -> str:
         """Get hex public key from private key (defaults to main nsec)."""
-        if privkey is None:
-            privkey = self._privkey
+        effective_privkey = privkey if privkey is not None else self._privkey
         # Nostr uses x-only public keys (32 bytes, without the prefix byte)
-        compressed_pubkey = privkey.public_key.format(compressed=True)
+        compressed_pubkey = effective_privkey.public_key.format(compressed=True)
         x_only_pubkey = compressed_pubkey[1:]  # Remove the prefix byte
         return x_only_pubkey.hex()
 
     def _get_pubkey_compressed(self, privkey: PrivateKey | None = None) -> str:
         """Get full compressed hex public key for encryption (33 bytes)."""
-        if privkey is None:
-            privkey = self._privkey
-        return privkey.public_key.format(compressed=True).hex()
+        effective_privkey = privkey if privkey is not None else self._privkey
+        return effective_privkey.public_key.format(compressed=True).hex()
 
     def _sign_event(self, event: dict) -> dict:
         """Sign a Nostr event with the user's private key."""
@@ -1069,12 +1065,12 @@ class Wallet:
         remaining = total_amount
         for denom in [64, 32, 16, 8, 4, 2, 1]:
             while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
+                secret, blinding_data, blinded_msg = self._create_blinded_message(
                     denom, keyset_id_active
                 )
                 outputs.append(blinded_msg)
                 secrets.append(secret)
-                blinding_factors.append(r_hex)
+                blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                 remaining -= denom
 
         # Swap proofs for new ones
@@ -1209,7 +1205,7 @@ class Wallet:
         # For small amounts, fees might be a fixed minimum
         if test_melt_quote.get("fee_reserve", 0) >= 1:
             # If fee reserve is significant for 1 sat, use a higher estimate
-            estimated_fee = max(estimated_fee, test_melt_quote["fee_reserve"])
+            estimated_fee = max(estimated_fee, test_melt_quote.get("fee_reserve", 0))
 
         # Step 2: Create mint quote at target mint for amount minus estimated fees
         amount_to_mint = total_amount - estimated_fee
@@ -1300,12 +1296,12 @@ class Wallet:
         remaining = amount_received
         for denom in [64, 32, 16, 8, 4, 2, 1]:
             while remaining >= denom:
-                secret, r_hex, blinded_msg = self._create_blinded_message(
+                secret, blinding_data, blinded_msg = self._create_blinded_message(
                     denom, keyset_id
                 )
                 outputs.append(blinded_msg)
                 secrets.append(secret)
-                blinding_factors.append(r_hex)
+                blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                 remaining -= denom
 
         # Mint new tokens
@@ -1383,9 +1379,7 @@ class Wallet:
         #     expiration=int(time.time()) + 14 * 24 * 60 * 60  # 2 weeks
         # )
 
-        return quote_resp["request"], quote_resp[
-            "quote"
-        ]  # Return both invoice and quote_id
+        return quote_resp.get("request", ""), quote_resp.get("quote", "")  # Return both invoice and quote_id
 
     async def check_quote_status(
         self, quote_id: str, amount: int | None = None
@@ -1434,12 +1428,12 @@ class Wallet:
             remaining = mint_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                    secret, blinding_data, blinded_msg = self._create_blinded_message(
                         denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     secrets.append(secret)
-                    blinding_factors.append(r_hex)
+                    blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                     remaining -= denom
 
             # Mint tokens
@@ -1637,12 +1631,12 @@ class Wallet:
 
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                    secret, blinding_data, blinded_msg = self._create_blinded_message(
                         denom, keyset_id_active
                     )
                     change_outputs.append(blinded_msg)
                     change_secrets.append(secret)
-                    change_blinding_factors.append(r_hex)
+                    change_blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                     remaining -= denom
 
         # Execute melt
@@ -1807,14 +1801,14 @@ class Wallet:
             remaining = amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                    secret, blinding_data, blinded_msg = self._create_blinded_message(
                         denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     send_outputs.append(blinded_msg)
                     all_secrets.append(secret)
                     send_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
+                    all_blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                     remaining -= denom
 
             # Outputs for change
@@ -1822,12 +1816,12 @@ class Wallet:
             remaining = change_amount
             for denom in [64, 32, 16, 8, 4, 2, 1]:
                 while remaining >= denom:
-                    secret, r_hex, blinded_msg = self._create_blinded_message(
+                    secret, blinding_data, blinded_msg = self._create_blinded_message(
                         denom, keyset_id_active
                     )
                     outputs.append(blinded_msg)
                     all_secrets.append(secret)
-                    all_blinding_factors.append(r_hex)
+                    all_blinding_factors.append(blinding_data.r)  # Extract r from BlindingData
                     remaining -= denom
 
             # Swap for exact denominations

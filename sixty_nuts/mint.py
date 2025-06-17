@@ -6,38 +6,27 @@ from typing import TypedDict, cast, Any
 
 import httpx
 
+from .crypto import BlindedMessage, BlindSignature as BlindedSignature, Proof
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Type definitions based on OpenAPI spec
+# Additional Type definitions for mint-specific extensions
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class BlindedMessage(TypedDict):
-    """Blinded message to be signed by mint."""
+class ProofOptional(TypedDict, total=False):
+    """Optional fields for Proof (NUT-00 specification)."""
 
-    amount: int
-    id: str  # keyset id
-    B_: str  # blinded secret
-
-
-class BlindedSignature(TypedDict):
-    """Blind signature from mint."""
-
-    amount: int
-    id: str  # keyset id
-    C_: str  # blinded signature
+    Y: str  # Optional for P2PK (hex string)
+    witness: str  # Optional witness data
+    dleq: dict[str, Any]  # Optional DLEQ proof (NUT-12)
 
 
-class Proof(TypedDict, total=False):
-    """Cashu proof/token."""
+# Full Proof type combining required and optional fields
+class ProofComplete(Proof, ProofOptional):
+    """Complete Proof type with both required and optional fields."""
 
-    id: str  # keyset id
-    amount: int
-    secret: str
-    C: str  # signature
-    Y: str  # optional for P2PK
-    witness: str  # optional witness data
-    dleq: dict[str, Any]  # optional DLEQ proof
+    pass
 
 
 class MintInfo(TypedDict, total=False):
@@ -75,14 +64,17 @@ class PostMintQuoteRequest(TypedDict, total=False):
     pubkey: str  # for P2PK
 
 
-class PostMintQuoteResponse(TypedDict, total=False):
+class PostMintQuoteResponse(TypedDict):
     """Mint quote response."""
 
+    # Required fields
     quote: str  # quote id
     request: str  # bolt11 invoice
     amount: int
     unit: str
     state: str  # "UNPAID", "PAID", "ISSUED"
+
+    # Optional fields - use TypedDict with total=False for these if needed
     expiry: int
     pubkey: str
     paid: bool
@@ -110,14 +102,17 @@ class PostMeltQuoteRequest(TypedDict, total=False):
     options: dict[str, Any]
 
 
-class PostMeltQuoteResponse(TypedDict, total=False):
+class PostMeltQuoteResponse(TypedDict):
     """Melt quote response."""
 
+    # Required fields
     quote: str
     amount: int
+    fee_reserve: int
+
+    # Optional fields
     unit: str
     request: str
-    fee_reserve: int
     paid: bool
     state: str
     expiry: int
@@ -129,14 +124,14 @@ class PostMeltRequest(TypedDict, total=False):
     """Request body for melting tokens."""
 
     quote: str
-    inputs: list[Proof]
+    inputs: list[ProofComplete]
     outputs: list[BlindedMessage]  # for change
 
 
 class PostSwapRequest(TypedDict):
     """Request body for swapping proofs."""
 
-    inputs: list[Proof]
+    inputs: list[ProofComplete]
     outputs: list[BlindedMessage]
 
 
@@ -320,7 +315,7 @@ class Mint:
         self,
         *,
         quote: str,
-        inputs: list[Proof],
+        inputs: list[ProofComplete],
         outputs: list[BlindedMessage] | None = None,
     ) -> PostMeltQuoteResponse:
         """Melt tokens to pay a Lightning invoice."""
@@ -341,7 +336,7 @@ class Mint:
     async def swap(
         self,
         *,
-        inputs: list[Proof],
+        inputs: list[ProofComplete],
         outputs: list[BlindedMessage],
     ) -> PostSwapResponse:
         """Swap proofs for new blinded signatures."""
