@@ -30,7 +30,7 @@ async def main():
     wallet = await Wallet.create(
         nsec="your_nostr_private_key_hex",  # or "nsec1..." bech32 format
         mint_urls=["https://mint.minibits.cash/Bitcoin"],
-        relays=["wss://relay.damus.io", "wss://nos.lol", "wss://nostr.wine"]
+        relays=["wss://relay.damus.io", "wss://nostr.wine"]
     )
     
     # Or use context manager for automatic cleanup
