@@ -493,8 +493,8 @@ class Wallet:
         # Cashu token format: cashuA<base64url(json)>
         token_data = {
             "token": [{"mint": mint_url, "proofs": token_proofs}],
-            "unit": self.currency,
-            "memo": "NIP-60 wallet transfer",
+            "unit": self.currency or "sat",  # Ensure unit is always present, default to "sat"
+            "memo": "NIP-60 wallet transfer",  # Default memo, but could be passed as arg
         }
         json_str = json.dumps(token_data, separators=(",", ":"))
         encoded = base64.urlsafe_b64encode(json_str.encode()).decode().rstrip("=")
@@ -517,7 +517,8 @@ class Wallet:
 
             # Extract mint and proofs from JSON format
             mint_info = token_data["token"][0]
-            unit = token_data["unit"]
+            # Safely get unit, defaulting to "sat" if not present (as per Cashu V3 common practice)
+            unit = token_data.get("unit", "sat")
             token_proofs = mint_info["proofs"]
 
             # Convert hex secrets to base64 for NIP-60 storage
