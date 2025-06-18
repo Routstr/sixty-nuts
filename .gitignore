@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.DS_Store
 
 # Virtual environments
 .venv
@@ -12,3 +13,4 @@ wheels/
 # testing
 .cashu
 .pypirc
+proof_backups/
