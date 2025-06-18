@@ -6,7 +6,7 @@ import httpx
 from unittest.mock import AsyncMock, Mock
 from sixty_nuts.mint import (
     Mint, MintError, InvalidKeysetError, BlindedMessage, Proof, 
-    CurrencyUnit, KeysResponse, Keyset
+    CurrencyUnit
 )
 
 

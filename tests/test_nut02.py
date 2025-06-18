@@ -2,13 +2,12 @@
 """Test NUT-02 Keysets and fees implementation."""
 
 import pytest
-import hashlib
 from unittest.mock import AsyncMock, Mock
 from typing import cast
 
 from sixty_nuts.crypto import derive_keyset_id, validate_keyset_id
 from sixty_nuts.mint import Mint, MintError
-from sixty_nuts.wallet import Wallet, TempWallet, ProofDict
+from sixty_nuts.wallet import TempWallet, ProofDict
 
 
 class TestKeysetIDDerivation:

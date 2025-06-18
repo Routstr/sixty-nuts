@@ -145,6 +145,7 @@ python auto_multi_mint_melt.py
 ```
 
 Features:
+
 - Automatic invoice amount detection
 - Total balance verification across all mints
 - Smart mint selection based on balance

@@ -16,21 +16,21 @@ async def accept_payment(token: str, trusted_mint: str):
         mint_urls=[trusted_mint],
     ) as wallet:
         # Parse token to show original amount
-        source_mint, unit, proofs = wallet._parse_cashu_token(token)
+        source_mint, token_unit, proofs = wallet._parse_cashu_token(token)
         original_amount = sum(p["amount"] for p in proofs)
 
         print(f"Token from: {source_mint}")
-        print(f"Amount: {original_amount} {unit}")
+        print(f"Amount: {original_amount} {token_unit}")
 
         # Redeem automatically swaps to trusted mint
-        amount, unit = await wallet.redeem(token)
+        amount, received_unit = await wallet.redeem(token)
 
         fees = original_amount - amount
-        print(f"\nReceived: {amount} {unit}")
+        print(f"\nReceived: {amount} {received_unit}")
         if fees > 0:
-            print(f"Lightning fees: {fees} {unit}")
+            print(f"Lightning fees: {fees} {received_unit}")
 
-        return amount, unit
+        return amount, received_unit
 
 
 async def main():

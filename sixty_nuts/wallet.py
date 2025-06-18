@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 import base64
 import hashlib
 import json
@@ -13,14 +13,18 @@ import asyncio
 import httpx
 from coincurve import PrivateKey, PublicKey
 
-from .mint import Mint, ProofComplete as Proof, BlindedMessage, CurrencyUnit
+from .mint import (
+    Mint,
+    ProofComplete as Proof,
+    BlindedMessage,
+    CurrencyUnit,
+    PostMeltQuoteResponse,
+)
 from .relay import NostrRelay, NostrEvent, RelayError
 from .crypto import (
-    blind_message,
     unblind_signature,
     NIP44Encrypt,
     hash_to_curve,
-    BlindingData,
     create_blinded_message,
 )
 
@@ -512,8 +516,10 @@ class Wallet:
         encoded = base64.urlsafe_b64encode(json_str.encode()).decode().rstrip("=")
         return f"cashuA{encoded}"
 
-    def _parse_cashu_token(self, token: str) -> tuple[str, str, list[ProofDict]]:
-        """Parse Cashu token and return (mint_url, proofs)."""
+    def _parse_cashu_token(
+        self, token: str
+    ) -> tuple[str, CurrencyUnit, list[ProofDict]]:
+        """Parse Cashu token and return (mint_url, unit, proofs)."""
         if not token.startswith("cashu"):
             raise ValueError("Invalid token format")
 
@@ -530,7 +536,9 @@ class Wallet:
             # Extract mint and proofs from JSON format
             mint_info = token_data["token"][0]
             # Safely get unit, defaulting to "sat" if not present (as per Cashu V3 common practice)
-            unit = token_data.get("unit", "sat")
+            unit_str = token_data.get("unit", "sat")
+            # Cast to CurrencyUnit - validate it's a known unit
+            token_unit: CurrencyUnit = cast(CurrencyUnit, unit_str)
             token_proofs = mint_info["proofs"]
 
             # Convert hex secrets to base64 for NIP-60 storage
@@ -554,7 +562,7 @@ class Wallet:
                     )
                 )
 
-            return mint_info["mint"], unit, nip60_proofs
+            return mint_info["mint"], token_unit, nip60_proofs
 
         elif token.startswith("cashuB"):
             # Version 4 - CBOR format
@@ -571,7 +579,9 @@ class Wallet:
             # Extract from CBOR format - different structure
             # 'm' = mint URL, 'u' = unit, 't' = tokens array
             mint_url = token_data["m"]
-            unit = token_data["u"]
+            unit_str = token_data["u"]
+            # Cast to CurrencyUnit
+            cbor_unit: CurrencyUnit = cast(CurrencyUnit, unit_str)
             proofs = []
 
             # Each token in 't' has 'i' (keyset id) and 'p' (proofs)
@@ -598,7 +608,7 @@ class Wallet:
                         )
                     )
 
-            return mint_url, unit, proofs
+            return mint_url, cbor_unit, proofs
         else:
             raise ValueError(f"Unknown token version: {token[:7]}")
 
@@ -880,12 +890,24 @@ class Wallet:
         balance = sum(p["amount"] for p in all_proofs)
 
         # Fetch mint keysets
-        mint_keysets = {}
+        mint_keysets: dict[str, list[dict[str, str]]] = {}
         for mint_url in self.mint_urls:
             mint = self._get_mint(mint_url)
             try:
                 keys_resp = await mint.get_keys()
-                mint_keysets[mint_url] = keys_resp.get("keysets", [])
+                # Convert Keyset type to dict[str, str] for wallet state
+                keysets_as_dicts: list[dict[str, str]] = []
+                for keyset in keys_resp.get("keysets", []):
+                    # Convert each keyset to a simple dict
+                    keyset_dict: dict[str, str] = {
+                        "id": keyset["id"],
+                        "unit": keyset["unit"],
+                    }
+                    # Add keys if present
+                    if "keys" in keyset and isinstance(keyset["keys"], dict):
+                        keyset_dict.update(keyset["keys"])
+                    keysets_as_dicts.append(keyset_dict)
+                mint_keysets[mint_url] = keysets_as_dicts
             except Exception:
                 mint_keysets[mint_url] = []
 
@@ -1628,7 +1650,9 @@ class Wallet:
         # First, get the invoice amount by checking with any mint that supports this unit
         invoice_amount = None
         lightning_fee_estimate = 0
-        capable_mints: list[tuple[str, Mint, dict]] = []  # (url, mint, quote)
+        capable_mints: list[
+            tuple[str, Mint, PostMeltQuoteResponse]
+        ] = []  # (url, mint, quote)
 
         # Check which mints can handle this invoice and get the amount
         for mint_url in self.mint_urls:
@@ -1776,6 +1800,8 @@ class Wallet:
                 # Group by source mint for proper token creation
                 swap_tokens: list[str] = []
                 for source_mint_url in set(p.get("mint", "") for p in proofs_to_swap):
+                    if not source_mint_url:  # Skip empty mint URLs
+                        continue
                     mint_proofs = [
                         p
                         for p in proofs_to_swap
@@ -1810,7 +1836,12 @@ class Wallet:
                 proofs_by_mint[mint_url].append(proof)
 
         # Select proofs from the chosen mint
-        mint_proofs = proofs_by_mint.get(selected_mint_url, [])
+        if selected_mint_url:
+            mint_proofs_for_spend = proofs_by_mint.get(selected_mint_url, [])
+        else:
+            # This should not happen, but handle gracefully
+            raise WalletError("No mint selected for payment")
+
         lightning_fee_reserve = int(selected_quote.get("fee_reserve", 0))
 
         # Select proofs to spend
@@ -1862,9 +1893,9 @@ class Wallet:
         )
 
         # Convert to mint proofs
-        mint_proofs: list[Proof] = []
+        proofs_for_melt: list[Proof] = []
         for p in selected_proofs:
-            mint_proofs.append(self._proofdict_to_mint_proof(p))
+            proofs_for_melt.append(self._proofdict_to_mint_proof(p))
 
         # Calculate change amount
         change_amount = selected_amount - total_needed
@@ -1890,7 +1921,7 @@ class Wallet:
         # Execute melt
         melt_resp = await selected_mint.melt(
             quote=selected_quote["quote"],
-            inputs=mint_proofs,
+            inputs=proofs_for_melt,
             outputs=change_outputs if change_outputs else None,
         )
 
