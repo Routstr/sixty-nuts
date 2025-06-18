@@ -317,7 +317,7 @@ If you see different balances when running `check_balance_and_proofs.py`:
 
 If the problem persists:
 
-4. Run `force_wallet_cleanup.py` as a last resort to completely rebuild the wallet state
+Run `force_wallet_cleanup.py` as a last resort to completely rebuild the wallet state
 
 ### Mint Errors (422)
 
