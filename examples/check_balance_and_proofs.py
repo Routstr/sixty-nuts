@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Example: Check wallet balance and validate proofs.
+"""Example: Check wallet balance and proof details.
 
-Shows how to check wallet balance, list proofs by mint, and validate their state.
-Useful for debugging and understanding wallet state.
+Shows current balance and proof state validation.
 """
 
 import asyncio
@@ -64,6 +63,48 @@ async def check_without_validation(wallet: Wallet):
     print("⚠️  Note: This may include spent proofs!")
 
 
+async def check_balance_detailed(wallet: Wallet):
+    """Check balance with detailed proof information."""
+    print("Checking wallet balance...")
+
+    # Get balance with proof validation
+    try:
+        balance_validated = await wallet.get_balance(check_proofs=True)
+        print(f"\n✅ Validated balance: {balance_validated} sats")
+        print("   (All proofs verified with mint)")
+    except Exception as e:
+        print(f"❌ Error validating proofs: {e}")
+        balance_validated = None
+
+    # Get balance without validation (faster)
+    try:
+        balance_quick = await wallet.get_balance(check_proofs=False)
+        print(f"\n📊 Quick balance: {balance_quick} sats")
+        print("   (From stored proofs, not validated)")
+    except Exception as e:
+        print(f"❌ Error getting balance: {e}")
+        balance_quick = None
+
+    # Get full wallet state
+    try:
+        state = await wallet.fetch_wallet_state(check_proofs=False)
+        print("\n📝 Wallet details:")
+        print(f"   Total proofs: {len(state.proofs)}")
+
+        # Group proofs by amount
+        amounts: dict[int, int] = {}
+        for proof in state.proofs:
+            amt = proof["amount"]
+            amounts[amt] = amounts.get(amt, 0) + 1
+
+        print("   Denominations:")
+        for amt in sorted(amounts.keys(), reverse=True):
+            print(f"     {amt:4d} sats × {amounts[amt]}")
+
+    except Exception as e:
+        print(f"❌ Error getting wallet state: {e}")
+
+
 async def main():
     """Main example."""
     load_dotenv()
@@ -76,11 +117,9 @@ async def main():
     async with Wallet(
         nsec=nsec,
     ) as wallet:
-        # Check with full validation
         await check_wallet_status(wallet)
-
-        # Also show fast check without validation
         await check_without_validation(wallet)
+        await check_balance_detailed(wallet)
 
 
 if __name__ == "__main__":

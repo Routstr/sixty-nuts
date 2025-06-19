@@ -1,225 +1,155 @@
+#!/usr/bin/env python3
+"""Validate a Cashu token and check which proofs are spent."""
+
 import asyncio
 import os
 import sys
 from dotenv import load_dotenv
-from sixty_nuts.wallet import Wallet, TempWallet
+from sixty_nuts.wallet import Wallet
 
 
-async def validate_token(token: str, trusted_mints: list[str] | None = None):
-    """Validate a Cashu token without redeeming it."""
-    print(f"Validating token: {token[:50]}...")
+async def validate_token(token: str):
+    """Validate a Cashu token and check spent status of each proof."""
+    print("🔍 Validating Cashu token...")
+    print("=" * 50)
 
-    # Use temporary wallet for validation
-    async with TempWallet() as wallet:
+    # Create a temporary wallet just for parsing
+    async with Wallet(
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
+    ) as wallet:
         try:
             # Parse the token
             mint_url, unit, proofs = wallet._parse_cashu_token(token)
-            total_amount = sum(p["amount"] for p in proofs)
 
             print("\n📊 Token details:")
-            print(f"  Mint: {mint_url}")
-            print(f"  Amount: {total_amount} {unit}")
-            print(f"  Proofs: {len(proofs)}")
+            print(f"   Mint: {mint_url}")
+            print(f"   Unit: {unit}")
+            print(f"   Proofs: {len(proofs)}")
+            print(f"   Total value: {sum(p['amount'] for p in proofs)} {unit}")
 
-            # Check if mint is trusted
-            is_trusted = True
-            if trusted_mints:
-                is_trusted = mint_url in trusted_mints
-                print(f"  Trusted mint: {'✅ Yes' if is_trusted else '❌ No'}")
+            # Group by keyset
+            keysets: dict[str, list] = {}
+            for proof in proofs:
+                keyset_id = proof["id"]
+                if keyset_id not in keysets:
+                    keysets[keyset_id] = []
+                keysets[keyset_id].append(proof)
 
-            # Validate proof states with the mint
-            print("\n🔍 Checking proof states...")
+            print("\n🔑 Keysets found:")
+            for keyset_id, keyset_proofs in keysets.items():
+                total = sum(p["amount"] for p in keyset_proofs)
+                print(f"   {keyset_id}: {len(keyset_proofs)} proofs, {total} {unit}")
+
+            # Check proof states
+            print("\n🔄 Checking proof states with mint...")
             mint = wallet._get_mint(mint_url)
 
-            # Compute Y values for validation
-            y_values = wallet._compute_proof_y_values(proofs)
-
-            # Check state with mint
-            state_response = await mint.check_state(Ys=y_values)
-
-            # Analyze results
             spent_count = 0
             unspent_count = 0
-            unknown_count = 0
-            unspent_amount = 0
+            error_count = 0
 
-            for i, proof in enumerate(proofs):
-                if i < len(state_response["states"]):
-                    state_info = state_response["states"][i]
-                    state = state_info.get("state", "UNKNOWN")
+            # Check in batches
+            batch_size = 100
+            for i in range(0, len(proofs), batch_size):
+                batch = proofs[i : i + batch_size]
 
-                    if state == "SPENT":
-                        spent_count += 1
-                    elif state == "UNSPENT":
-                        unspent_count += 1
-                        unspent_amount += proof["amount"]
+                try:
+                    # Compute Y values for this batch
+                    y_values = wallet._compute_proof_y_values(batch)
+                    state_response = await mint.check_state(Ys=y_values)
+
+                    for j, proof in enumerate(batch):
+                        if j < len(state_response.get("states", [])):
+                            state_info = state_response["states"][j]
+                            state = state_info.get("state", "UNKNOWN")
+
+                            if state == "SPENT":
+                                spent_count += 1
+                            elif state == "UNSPENT":
+                                unspent_count += 1
+                            else:
+                                error_count += 1
+
+                            # Show first few individual results
+                            if i + j < 5:  # Show first 5 proofs
+                                print(
+                                    f"   Proof {i + j + 1}: {proof['amount']} {unit} - {state}"
+                                )
+                        else:
+                            error_count += 1
+
+                except Exception as e:
+                    print(f"   Error checking batch {i // batch_size + 1}: {str(e)}")
+                    error_count += len(batch)
+
+            if len(proofs) > 5:
+                print(f"   ... and {len(proofs) - 5} more")
+
+            # Summary
+            print("\n📈 Validation Summary:")
+            print(f"   Total proofs: {len(proofs)}")
+            print(f"   ✅ Unspent: {unspent_count} proofs")
+            print(f"   ❌ Spent: {spent_count} proofs")
+            if error_count > 0:
+                print(f"   ⚠️  Errors: {error_count} proofs")
+
+            if spent_count == len(proofs):
+                print("\n❌ All proofs in this token are already spent!")
+            elif spent_count > 0:
+                print(
+                    f"\n⚠️  Warning: {spent_count} out of {len(proofs)} proofs are already spent."
+                )
+                print("   The token will fail to redeem due to spent proofs.")
+            elif unspent_count == len(proofs):
+                print("\n✅ All proofs are unspent and should be redeemable!")
+
+            # Check if keysets are active
+            print("\n🔐 Checking keyset status...")
+            try:
+                keys_resp = await mint.get_keys()
+                active_keysets = {ks["id"] for ks in keys_resp.get("keysets", [])}
+
+                for keyset_id in keysets.keys():
+                    if keyset_id in active_keysets:
+                        print(f"   ✅ Keyset {keyset_id} is active")
                     else:
-                        unknown_count += 1
-
-            print("\n📋 Validation results:")
-            print(f"  Unspent proofs: {unspent_count}/{len(proofs)}")
-            print(f"  Spent proofs: {spent_count}/{len(proofs)}")
-            if unknown_count > 0:
-                print(f"  Unknown state: {unknown_count}/{len(proofs)}")
-
-            print(f"\n💰 Valid amount: {unspent_amount} {unit}")
-
-            # Overall validation result
-            is_valid = (
-                unspent_count == len(proofs)  # All proofs unspent
-                and spent_count == 0  # No spent proofs
-                and unspent_amount == total_amount  # Amount matches
-                and is_trusted  # From trusted mint
-            )
-
-            if is_valid:
-                print("\n✅ Token is VALID and can be accepted")
-            else:
-                print("\n❌ Token is INVALID:")
-                if spent_count > 0:
-                    print("   - Contains spent proofs")
-                if unspent_amount != total_amount:
-                    print(
-                        f"   - Amount mismatch (expected {total_amount}, got {unspent_amount})"
-                    )
-                if not is_trusted and trusted_mints:
-                    print("   - From untrusted mint")
-
-            return {
-                "valid": is_valid,
-                "mint": mint_url,
-                "amount": unspent_amount,
-                "unit": unit,
-                "trusted": is_trusted,
-                "unspent_proofs": unspent_count,
-                "spent_proofs": spent_count,
-            }
+                        print(f"   ❌ Keyset {keyset_id} is NOT active (obsolete)")
+                        print("      This keyset cannot be redeemed normally!")
+            except Exception as e:
+                print(f"   Error checking keysets: {str(e)}")
 
         except Exception as e:
-            print(f"\n❌ Token validation failed: {e}")
-            return {"valid": False, "error": str(e)}
-
-
-async def merchant_accept_flow(token: str, expected_amount: int | None = None):
-    """Complete merchant acceptance flow with validation."""
-    TRUSTED_MINTS = [
-        "https://mint.minibits.cash/Bitcoin",
-        "https://legend.lnbits.com/cashu/api/v1/AptDNABNBXv8gpuywhx6NV",
-    ]
-
-    # Load dotenv here specifically within the merchant flow if needed
-    # Or ensure it's loaded once at a higher level (e.g., main function)
-    load_dotenv()
-    nsec = os.getenv("NSEC")
-    if not nsec:
-        print("Error: NSEC environment variable not set. Please create a .env file.")
-        return False # Return False to indicate failure
-
-    print("🏪 Merchant payment acceptance")
-    print("=" * 40)
-
-    # Step 1: Validate token
-    validation = await validate_token(token, TRUSTED_MINTS)
-
-    if not validation["valid"]:
-        print("\n❌ Payment rejected - invalid token")
-        return False
-
-    # Step 2: Check amount if specified
-    if expected_amount is not None:
-        if validation["amount"] < expected_amount:
-            print("\n❌ Payment rejected - insufficient amount")
-            print(f"   Expected: {expected_amount} {validation['unit']}")
-            print(f"   Received: {validation['amount']} {validation['unit']}")
-            return False
-
-    # Step 3: Accept payment
-    print(f"\n💳 Accepting payment of {validation['amount']} {validation['unit']}...")
-
-    async with Wallet(
-        nsec=nsec,
-        mint_urls=TRUSTED_MINTS,
-    ) as wallet:
-        try:
-            amount, unit = await wallet.redeem(token)
-            print(f"✅ Payment accepted: {amount} {unit}")
-
-            # Show new balance
-            balance = await wallet.get_balance()
-            print(f"💰 New balance: {balance} {unit}")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Failed to redeem: {e}")
-            return False
-
-
-async def batch_validate(tokens: list[str]):
-    """Validate multiple tokens at once."""
-    print(f"Validating {len(tokens)} tokens...\n")
-
-    results = []
-    total_valid_amount = 0
-
-    for i, token in enumerate(tokens, 1):
-        print(f"Token {i}/{len(tokens)}:")
-        result = await validate_token(token)
-        results.append(result)
-
-        if result["valid"]:
-            total_valid_amount += result["amount"]
-
-        print("-" * 40)
-
-    # Summary
-    valid_count = sum(1 for r in results if r["valid"])
-    print("\n📊 Summary:")
-    print(f"  Valid tokens: {valid_count}/{len(tokens)}")
-    print(f"  Total valid amount: {total_valid_amount} sats")
-
-    return results
+            print(f"\n❌ Error parsing token: {str(e)}")
+            return
 
 
 async def main():
-    """Main example."""
+    """Main function."""
     if len(sys.argv) < 2:
-        print("Usage: python validate_token.py <cashu_token> [expected_amount]")
-        print("Example: python validate_token.py cashuAey...")
-        print("\nFor merchant flow:")
-        print(
-            "Usage: python validate_token.py merchant <cashu_token> [expected_amount]"
-        )
-        print("\nFor batch validation:")
-        print("Usage: python validate_token.py batch <token1> <token2> ...")
-        return
+        print("Usage: python validate_token.py <token_or_file>")
+        print("\nProvide either:")
+        print("  - A Cashu token string (starting with 'cashuA...')")
+        print("  - A filename containing a Cashu token")
+        sys.exit(1)
 
-    # It's better to load dotenv once at the top of the main function
-    # if multiple functions within the file might need it,
-    # but here I put it inside merchant_accept_flow as it's the only one that needs it.
+    token_input = sys.argv[1]
 
-    if sys.argv[1] == "merchant":
-        # Merchant acceptance flow
-        if len(sys.argv) < 3:
-            print("Need token for merchant flow")
-            return
-
-        token = sys.argv[2]
-        expected = int(sys.argv[3]) if len(sys.argv) > 3 else None
-        await merchant_accept_flow(token, expected)
-
-    elif sys.argv[1] == "batch":
-        # Batch validation
-        tokens = sys.argv[2:]
-        if not tokens:
-            print("Need at least one token for batch validation")
-            return
-        await batch_validate(tokens)
-
+    # Check if it's a file or a token string
+    if token_input.startswith("cashuA"):
+        token = token_input
     else:
-        # Simple validation
-        token = sys.argv[1]
-        await validate_token(token)
+        # Try to read from file
+        try:
+            with open(token_input, "r") as f:
+                token = f.read().strip()
+        except FileNotFoundError:
+            print(f"❌ File not found: {token_input}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ Error reading file: {e}")
+            sys.exit(1)
+
+    await validate_token(token)
 
 
 if __name__ == "__main__":

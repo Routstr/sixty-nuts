@@ -7,7 +7,7 @@ Perfect for redeeming tokens directly to a Lightning Address.
 
 import asyncio
 import sys
-from sixty_nuts.wallet import TempWallet, redeem_to_lnurl
+from sixty_nuts.wallet import TempWallet, redeem_to_lnurl, WalletError
 
 
 async def redeem_with_temp_wallet(token: str, lightning_address: str):
@@ -18,19 +18,45 @@ async def redeem_with_temp_wallet(token: str, lightning_address: str):
     async with TempWallet() as wallet:
         print("🔑 Created temporary wallet (keys not stored)")
 
-        # Redeem the token
-        amount, unit = await wallet.redeem(token)
-        print(f"✅ Redeemed {amount} {unit}")
+        try:
+            # Redeem the token
+            amount, unit = await wallet.redeem(token)
+            print(f"✅ Redeemed {amount} {unit}")
 
-        # Send to Lightning Address
-        print(f"\nSending to {lightning_address}...")
-        paid = await wallet.send_to_lnurl(lightning_address, amount)
-        print(f"⚡ Sent {paid} {unit} (after fees)")
+            # For very small amounts, warn but still try
+            if amount <= 1:
+                print(
+                    f"\n⚠️  Warning: {amount} {unit} is very small - fees will consume it all"
+                )
+                return
 
-        # Check final balance (should be 0 or close to 0)
-        balance = await wallet.get_balance()
-        if balance > 0:
-            print(f"\n💰 Dust remaining: {balance} {unit}")
+            # Send to Lightning Address
+            print(f"\nSending to {lightning_address}...")
+
+            try:
+                # First try sending the full amount
+                paid = await wallet.send_to_lnurl(lightning_address, amount)
+                print(f"⚡ Sent {paid} {unit} total")
+            except WalletError as e:
+                if "Insufficient balance" in str(e) and amount > 1:
+                    # Automatically retry with 1 less to account for fees
+                    print(
+                        f"💡 Adjusting for fees, sending {amount - 1} {unit} instead..."
+                    )
+                    paid = await wallet.send_to_lnurl(lightning_address, amount - 1)
+                    print(f"⚡ Sent {paid} {unit} total (after fees)")
+                else:
+                    raise
+
+            # Check final balance (should be 0 or close to 0)
+            balance = await wallet.get_balance()
+            if balance > 0:
+                print(f"\n💰 Dust remaining: {balance} {unit}")
+
+        except WalletError as e:
+            print(f"\n❌ Error: {e}")
+        except Exception as e:
+            print(f"\n❌ Error: {e}")
 
 
 async def direct_redeem_example(token: str, lightning_address: str):
@@ -39,7 +65,11 @@ async def direct_redeem_example(token: str, lightning_address: str):
 
     try:
         amount = await redeem_to_lnurl(token, lightning_address)
-        print(f"✅ Successfully redeemed {amount} sats to {lightning_address}")
+        print(f"✅ Successfully sent {amount} sats to {lightning_address}")
+    except WalletError as e:
+        print(f"❌ Redemption failed: {e}")
+        if "too small" in str(e):
+            print("💡 Token value is too small (1 sat or less)")
     except Exception as e:
         print(f"❌ Redemption failed: {e}")
 
@@ -49,6 +79,7 @@ async def batch_redeem_example(tokens: list[str], lightning_address: str):
     print(f"\nBatch redeeming {len(tokens)} tokens...")
 
     total_redeemed = 0
+    unit = "sat"
 
     # Use temporary wallet for all tokens
     async with TempWallet() as wallet:
@@ -63,10 +94,32 @@ async def batch_redeem_example(tokens: list[str], lightning_address: str):
 
         if total_redeemed > 0:
             print(f"\nTotal collected: {total_redeemed} {unit}")
-            print(f"Sending all to {lightning_address}...")
 
-            paid = await wallet.send_to_lnurl(lightning_address, total_redeemed)
-            print(f"⚡ Sent {paid} {unit} (after fees)")
+            # Check if we have enough for fees
+            if total_redeemed <= 1:
+                print(
+                    f"⚠️  {total_redeemed} {unit} is too small - fees would consume it all"
+                )
+                return
+
+            print(f"Sending to {lightning_address}...")
+
+            try:
+                # Try sending the full amount
+                paid = await wallet.send_to_lnurl(lightning_address, total_redeemed)
+                print(f"⚡ Sent {paid} {unit} total")
+            except WalletError as e:
+                if "Insufficient balance" in str(e) and total_redeemed > 1:
+                    # Automatically adjust for fees
+                    print(
+                        f"💡 Adjusting for fees, sending {total_redeemed - 1} {unit} instead..."
+                    )
+                    paid = await wallet.send_to_lnurl(
+                        lightning_address, total_redeemed - 1
+                    )
+                    print(f"⚡ Sent {paid} {unit} total (after fees)")
+                else:
+                    print(f"❌ Failed to send: {e}")
 
 
 async def main():
@@ -78,6 +131,8 @@ async def main():
         print(
             "Usage: python one_off_redeem.py <lightning_address> <token1> <token2> ..."
         )
+        print("\n💡 Note: The script automatically handles Lightning fees")
+        print("   For a 5 sat token, you'll receive ~4 sats after fees")
         return
 
     if sys.argv[1].startswith("cashu"):
