@@ -94,24 +94,29 @@ class NostrRelay:
         self.url = url
         self.ws: Any = None
         self.subscriptions: dict[str, Callable[[NostrEvent], None]] = {}
+        # Add locks for concurrent access protection
+        self._send_lock = asyncio.Lock()
+        self._recv_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to the relay."""
         import asyncio
 
-        if self.ws is None or self.ws.close_code is not None:
-            try:
-                # Add connection timeout
-                async with asyncio.timeout(5.0):
-                    self.ws = await websockets.connect(
-                        self.url, ping_interval=20, ping_timeout=10, close_timeout=10
-                    )
-            except asyncio.TimeoutError:
-                print(f"Timeout connecting to relay: {self.url}")
-                raise RelayError(f"Connection timeout: {self.url}")
-            except Exception as e:
-                print(f"Failed to connect to relay {self.url}: {e}")
-                raise RelayError(f"Connection failed: {e}")
+        async with self._connect_lock:
+            if self.ws is None or self.ws.close_code is not None:
+                try:
+                    # Add connection timeout
+                    async with asyncio.timeout(5.0):
+                        self.ws = await websockets.connect(
+                            self.url, ping_interval=20, ping_timeout=10, close_timeout=10
+                        )
+                except asyncio.TimeoutError:
+                    print(f"Timeout connecting to relay: {self.url}")
+                    raise RelayError(f"Connection timeout: {self.url}")
+                except Exception as e:
+                    print(f"Failed to connect to relay {self.url}: {e}")
+                    raise RelayError(f"Connection failed: {e}")
 
     async def disconnect(self) -> None:
         """Disconnect from the relay."""
@@ -120,16 +125,18 @@ class NostrRelay:
 
     async def _send(self, message: list[Any]) -> None:
         """Send a message to the relay."""
-        if not self.ws or self.ws.close_code is not None:
-            raise RelayError("Not connected to relay")
-        await self.ws.send(json.dumps(message))
+        async with self._send_lock:
+            if not self.ws or self.ws.close_code is not None:
+                raise RelayError("Not connected to relay")
+            await self.ws.send(json.dumps(message))
 
     async def _recv(self) -> list[Any]:
         """Receive a message from the relay."""
-        if not self.ws or self.ws.close_code is not None:
-            raise RelayError("Not connected to relay")
-        data = await self.ws.recv()
-        return json.loads(data)
+        async with self._recv_lock:
+            if not self.ws or self.ws.close_code is not None:
+                raise RelayError("Not connected to relay")
+            data = await self.ws.recv()
+            return json.loads(data)
 
     # ───────────────────────── Publishing Events ─────────────────────────────────
 

@@ -144,6 +144,9 @@ class Wallet:
         # Rate limiting for relay operations
         self._last_relay_operation = 0.0
         self._min_relay_interval = 1.0  # Minimum 1 second between operations
+        
+        # Add lock for serializing relay operations to prevent WebSocket concurrency errors
+        self._relay_operation_lock = asyncio.Lock()
 
     def _validate_currency_unit(self, unit: CurrencyUnit) -> None:
         """Validate currency unit is supported per NUT-01.
@@ -428,10 +431,11 @@ class Wallet:
         # Use a well-known relay to bootstrap
         bootstrap_relay = NostrRelay("wss://relay.damus.io")
         try:
-            await bootstrap_relay.connect()
-            relays = await bootstrap_relay.fetch_relay_recommendations(
-                self._get_pubkey()
-            )
+            async with self._relay_operation_lock:
+                await bootstrap_relay.connect()
+                relays = await bootstrap_relay.fetch_relay_recommendations(
+                    self._get_pubkey()
+                )
             return relays
         except Exception:
             return []
@@ -452,34 +456,36 @@ class Wallet:
 
     async def _publish_to_relays(self, event: dict) -> str:
         """Publish event to all relays and return event ID."""
-        # Apply rate limiting
-        await self._rate_limit_relay_operations()
+        # Serialize relay operations to prevent WebSocket concurrency errors
+        async with self._relay_operation_lock:
+            # Apply rate limiting
+            await self._rate_limit_relay_operations()
 
-        relays = await self._get_relay_connections()
-        event_dict = NostrEvent(**event)  # type: ignore
+            relays = await self._get_relay_connections()
+            event_dict = NostrEvent(**event)  # type: ignore
 
-        # Try to publish to at least one relay
-        published = False
-        errors = []
+            # Try to publish to at least one relay
+            published = False
+            errors = []
 
-        for relay in relays:
-            try:
-                if await relay.publish_event(event_dict):
-                    published = True
-                else:
-                    errors.append(f"{relay.url}: Event rejected")
-            except Exception as e:
-                errors.append(f"{relay.url}: {str(e)}")
-                continue
+            for relay in relays:
+                try:
+                    if await relay.publish_event(event_dict):
+                        published = True
+                    else:
+                        errors.append(f"{relay.url}: Event rejected")
+                except Exception as e:
+                    errors.append(f"{relay.url}: {str(e)}")
+                    continue
 
-        if not published:
-            # Only log if we can't publish anywhere to avoid log spam
-            error_msg = f"Failed to publish event to any relay. Last error: {errors[-1] if errors else 'Unknown'}"
-            print(f"Warning: {error_msg}")
-            # Don't raise exception - allow operations to continue
+            if not published:
+                # Only log if we can't publish anywhere to avoid log spam
+                error_msg = f"Failed to publish event to any relay. Last error: {errors[-1] if errors else 'Unknown'}"
+                print(f"Warning: {error_msg}")
+                # Don't raise exception - allow operations to continue
+                return event["id"]
+
             return event["id"]
-
-        return event["id"]
 
     def _serialize_proofs_for_token(
         self, proofs: list[ProofDict], mint_url: str
@@ -777,23 +783,25 @@ class Wallet:
         if check_proofs:
             self.clear_spent_proof_cache()
 
-        relays = await self._get_relay_connections()
-        pubkey = self._get_pubkey()
+        # Serialize relay operations to prevent WebSocket concurrency errors
+        async with self._relay_operation_lock:
+            relays = await self._get_relay_connections()
+            pubkey = self._get_pubkey()
 
-        # Fetch all wallet-related events
-        all_events: list[NostrEvent] = []
-        event_ids_seen: set[str] = set()
+            # Fetch all wallet-related events
+            all_events: list[NostrEvent] = []
+            event_ids_seen: set[str] = set()
 
-        for relay in relays:
-            try:
-                events = await relay.fetch_wallet_events(pubkey)
-                # Deduplicate events
-                for event in events:
-                    if event["id"] not in event_ids_seen:
-                        all_events.append(event)
-                        event_ids_seen.add(event["id"])
-            except Exception:
-                continue
+            for relay in relays:
+                try:
+                    events = await relay.fetch_wallet_events(pubkey)
+                    # Deduplicate events
+                    for event in events:
+                        if event["id"] not in event_ids_seen:
+                            all_events.append(event)
+                            event_ids_seen.add(event["id"])
+                except Exception:
+                    continue
 
         # Find wallet event
         wallet_event = None
