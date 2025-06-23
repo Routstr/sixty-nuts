@@ -2467,9 +2467,13 @@ class Wallet:
         """Close underlying HTTP clients."""
         await self.mint_client.aclose()
 
-        # Close relay connections
-        for relay in self.relay_instances:
-            await relay.disconnect()
+        # Close relay pool if using queued relays
+        if self._use_queued_relays and self.relay_pool:
+            await self.relay_pool.disconnect_all()
+        else:
+            # Close individual relay connections
+            for relay in self.relay_instances:
+                await relay.disconnect()
 
         # Close mint clients
         for mint in self.mints.values():
