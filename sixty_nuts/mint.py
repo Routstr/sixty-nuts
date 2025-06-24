@@ -497,6 +497,113 @@ class Mint:
             PostRestoreResponse, await self._request("POST", "/v1/restore", json=body)
         )
 
+    # ───────────────────────── Quote Status & Minting ─────────────────────────────────
+
+    async def check_quote_status_and_mint(
+        self,
+        quote_id: str,
+        amount: int | None = None,
+        *,
+        minted_quotes: set[str],
+        mint_url: str,
+    ) -> tuple[dict[str, object], list[dict] | None]:
+        """Check whether a quote has been paid and mint proofs if so.
+
+        Args:
+            quote_id: Quote ID to check
+            amount: Expected amount (if not available in quote status)
+            minted_quotes: Set of already minted quote IDs to avoid double-minting
+            mint_url: Mint URL to include in proof metadata
+
+        Returns:
+            Tuple of (quote_status, new_proofs_or_none)
+        """
+        from .crypto import (
+            create_blinded_messages_for_amount,
+            get_mint_pubkey_for_amount,
+            unblind_signature,
+        )
+        from coincurve import PublicKey
+
+        # Check quote status
+        quote_status = await self.get_mint_quote(quote_id)
+
+        if quote_status.get("paid") and quote_status.get("state") == "PAID":
+            # Check if we've already minted for this quote
+            if quote_id in minted_quotes:
+                return dict(quote_status), None
+
+            # Mark this quote as being minted
+            minted_quotes.add(quote_id)
+
+            # Get amount from quote_status or use provided amount
+            mint_amount = quote_status.get("amount", amount)
+            if mint_amount is None:
+                raise ValueError(
+                    "Amount not available in quote status and not provided"
+                )
+
+            # Get active keyset
+            keys_resp = await self.get_keys()
+            keysets = keys_resp.get("keysets", [])
+            keyset_id = keysets[0]["id"] if keysets else ""
+
+            # Simple denomination split using mint's active keyset id
+            keys_resp_active = await self.get_keys()
+            keysets_active = keys_resp_active.get("keysets", [])
+            keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
+
+            # Create blinded messages for the amount
+            outputs, secrets, blinding_factors = create_blinded_messages_for_amount(
+                mint_amount, keyset_id_active
+            )
+
+            # Mint tokens
+            mint_resp = await self.mint(quote=quote_id, outputs=outputs)
+
+            # Get mint public key for unblinding
+            keys_resp = await self.get_keys()
+            mint_keys = None
+            for ks in keys_resp.get("keysets", []):
+                if ks["id"] == keyset_id_active:
+                    keys_data: str | dict[str, str] = ks.get("keys", {})
+                    if isinstance(keys_data, dict) and keys_data:
+                        mint_keys = keys_data
+                        break
+
+            if not mint_keys:
+                raise MintError("Could not find mint keys")
+
+            # Convert to proofs
+            new_proofs: list[dict] = []
+            for i, sig in enumerate(mint_resp["signatures"]):
+                # Get the public key for this amount
+                amount_val = sig["amount"]
+                mint_pubkey = get_mint_pubkey_for_amount(mint_keys, amount_val)
+                if not mint_pubkey:
+                    raise MintError(
+                        f"Could not find mint public key for amount {amount_val}"
+                    )
+
+                # Unblind the signature
+                C_ = PublicKey(bytes.fromhex(sig["C_"]))
+                r = bytes.fromhex(blinding_factors[i])
+                C = unblind_signature(C_, r, mint_pubkey)
+
+                new_proofs.append(
+                    {
+                        "id": sig["id"],
+                        "amount": sig["amount"],
+                        "secret": secrets[i],
+                        "C": C.format(compressed=True).hex(),
+                        "mint": mint_url,
+                    }
+                )
+
+            return dict(quote_status), new_proofs
+
+        return dict(quote_status), None
+
     # ───────────────────────── Keyset Validation ─────────────────────────────────
 
     def validate_keyset(self, keyset: dict) -> bool:

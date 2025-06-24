@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import math
 import secrets
 import struct
+import time
 from dataclasses import dataclass
 from typing import Tuple, TypedDict
 
@@ -16,6 +18,12 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
+try:
+    from bech32 import bech32_decode, convertbits  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
+    bech32_decode = None  # type: ignore
+    convertbits = None  # type: ignore
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -549,3 +557,194 @@ def validate_keyset_id(keyset_id: str, keys: dict[str, str], version: int = 0) -
         return keyset_id.lower() == expected_id.lower()
     except Exception:
         return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wallet Crypto Helpers (moved from wallet.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def create_blinded_messages_for_amount(
+    amount: int, keyset_id: str
+) -> tuple[list[BlindedMessage], list[str], list[str]]:
+    """Create blinded messages for a given amount using optimal denominations.
+
+    Args:
+        amount: Total amount to split into denominations
+        keyset_id: The keyset ID to use for the blinded messages
+
+    Returns:
+        Tuple of (blinded_messages, secrets, blinding_factors)
+    """
+    outputs: list[BlindedMessage] = []
+    secrets_list: list[str] = []
+    blinding_factors: list[str] = []
+
+    remaining = amount
+
+    for denom in [
+        16384,
+        8192,
+        4096,
+        2048,
+        1024,
+        512,
+        256,
+        128,
+        64,
+        32,
+        16,
+        8,
+        4,
+        2,
+        1,
+    ]:
+        while remaining >= denom:
+            secret, r_hex, blinded_msg = create_blinded_message_with_secret(
+                denom, keyset_id
+            )
+            outputs.append(blinded_msg)
+            secrets_list.append(secret)
+            blinding_factors.append(r_hex)
+            remaining -= denom
+
+    return outputs, secrets_list, blinding_factors
+
+
+def create_blinded_message_with_secret(
+    amount: int, keyset_id: str
+) -> tuple[str, str, BlindedMessage]:
+    """Create a properly blinded message for the mint using the updated crypto API.
+
+    Returns:
+        Tuple of (secret_hex, blinding_factor_hex, blinded_message)
+    """
+    # Generate random 32-byte secret
+    secret_bytes = secrets.token_bytes(32)
+
+    # Convert to hex string (this is what Cashu protocol expects)
+    secret_hex = secret_bytes.hex()
+
+    # For blinding, use UTF-8 bytes of the hex string (Cashu standard)
+    secret_utf8_bytes = secret_hex.encode("utf-8")
+
+    # Use the create_blinded_message function
+    blinded_msg, blinding_data = create_blinded_message(
+        amount=amount, keyset_id=keyset_id, secret=secret_utf8_bytes
+    )
+
+    # The secret that is stored and used in proofs is the hex representation
+    # of the random bytes, as per NUT-00 recommendation.
+    blinding_factor_hex = blinding_data.r
+
+    return secret_hex, blinding_factor_hex, blinded_msg
+
+
+def get_mint_pubkey_for_amount(
+    keys_data: dict[str, str], amount: int
+) -> PublicKey | None:
+    """Get the mint's public key for a specific amount.
+
+    Args:
+        keys_data: Dictionary mapping amounts to public keys
+        amount: The denomination amount
+
+    Returns:
+        PublicKey or None if not found
+    """
+    # Keys are indexed by string amount
+    pubkey_hex = keys_data.get(str(amount))
+    if pubkey_hex:
+        return PublicKey(bytes.fromhex(pubkey_hex))
+    return None
+
+
+def decode_nsec(nsec: str) -> PrivateKey:
+    """Decode `nsec` (bech32 as per Nostr) or raw hex private key."""
+    if nsec.startswith("nsec1"):
+        if bech32_decode is None or convertbits is None:
+            raise NotImplementedError(
+                "bech32 library missing – install `bech32` to use bech32-encoded nsec keys"
+            )
+
+        hrp, data = bech32_decode(nsec)
+        if hrp != "nsec" or data is None:
+            raise ValueError("Malformed nsec bech32 string")
+
+        decoded = bytes(convertbits(data, 5, 8, False))  # type: ignore
+        if len(decoded) != 32:
+            raise ValueError("Invalid nsec length after decoding")
+        return PrivateKey(decoded)
+
+    # Fallback – treat as raw hex key
+    return PrivateKey(bytes.fromhex(nsec))
+
+
+def generate_privkey() -> str:
+    """Generate a new secp256k1 private key for wallet P2PK operations."""
+    return PrivateKey().to_hex()
+
+
+def get_pubkey(privkey: PrivateKey) -> str:
+    """Get hex public key from private key (Nostr x-only format)."""
+    # Nostr uses x-only public keys (32 bytes, without the prefix byte)
+    compressed_pubkey = privkey.public_key.format(compressed=True)
+    x_only_pubkey = compressed_pubkey[1:]  # Remove the prefix byte
+    return x_only_pubkey.hex()
+
+
+def get_pubkey_compressed(privkey: PrivateKey) -> str:
+    """Get full compressed hex public key for encryption (33 bytes)."""
+    return privkey.public_key.format(compressed=True).hex()
+
+
+def sign_event(event: dict, privkey: PrivateKey) -> dict:
+    """Sign a Nostr event with the provided private key."""
+    # Ensure event has required fields
+    event["pubkey"] = get_pubkey(privkey)
+    event["created_at"] = event.get("created_at", int(time.time()))
+    event["id"] = compute_event_id(event)
+
+    # Sign the event
+    sig = privkey.sign_schnorr(bytes.fromhex(event["id"]))
+    event["sig"] = sig.hex()
+
+    return event
+
+
+def compute_event_id(event: dict) -> str:
+    """Compute Nostr event ID (hash of canonical JSON)."""
+    # Canonical format: [0, pubkey, created_at, kind, tags, content]
+    canonical = json.dumps(
+        [
+            0,
+            event["pubkey"],
+            event["created_at"],
+            event["kind"],
+            event["tags"],
+            event["content"],
+        ],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def nip44_encrypt(
+    plaintext: str, sender_privkey: PrivateKey, recipient_pubkey: str | None = None
+) -> str:
+    """Encrypt content using NIP-44 v2."""
+    if recipient_pubkey is None:
+        recipient_pubkey = get_pubkey_compressed(sender_privkey)
+
+    return NIP44Encrypt.encrypt(plaintext, sender_privkey, recipient_pubkey)
+
+
+def nip44_decrypt(
+    ciphertext: str, recipient_privkey: PrivateKey, sender_pubkey: str | None = None
+) -> str:
+    """Decrypt content using NIP-44 v2."""
+    if sender_pubkey is None:
+        sender_pubkey = get_pubkey_compressed(recipient_privkey)
+
+    return NIP44Encrypt.decrypt(ciphertext, recipient_privkey, sender_pubkey)

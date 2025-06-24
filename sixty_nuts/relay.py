@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TypedDict, Callable, Any
+from enum import IntEnum
 from uuid import uuid4
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from collections import deque
 import asyncio
 
 import websockets
+from coincurve import PrivateKey
 
 
 # -----------------------------------------------------------------------------
@@ -50,6 +52,17 @@ if not hasattr(asyncio, "timeout"):
 # ──────────────────────────────────────────────────────────────────────────────
 # Nostr protocol types
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+class EventKind(IntEnum):
+    """Nostr event kinds relevant to NIP-60."""
+
+    RELAY_RECOMMENDATIONS = 10019
+    Wallet = 17375  # wallet metadata
+    Token = 7375  # unspent proofs
+    History = 7376  # optional transaction log
+    QuoteTracker = 7374  # mint quote tracker (optional)
+    Delete = 5  # NIP-09 delete event
 
 
 class NostrEvent(TypedDict):
@@ -628,3 +641,228 @@ class RelayPool:
         """Disconnect all relays."""
         for relay in self.relays:
             await relay.disconnect()
+
+
+def create_event(
+    kind: int,
+    content: str = "",
+    tags: list[list[str]] | None = None,
+) -> dict:
+    """Create unsigned Nostr event structure."""
+    return {
+        "kind": kind,
+        "content": content,
+        "tags": tags or [],
+        "created_at": int(time.time()),
+    }
+
+
+class RelayManager:
+    """Manages relay connections, discovery, and publishing for NIP-60 wallets."""
+
+    def __init__(
+        self,
+        relay_urls: list[str],
+        privkey: PrivateKey,
+        *,
+        use_queued_relays: bool = True,
+        min_relay_interval: float = 1.0,
+    ) -> None:
+        """Initialize relay manager.
+
+        Args:
+            relay_urls: List of relay URLs to connect to
+            privkey: PrivateKey object for relay discovery and event signing
+            use_queued_relays: Whether to use queued relays
+            min_relay_interval: Minimum interval between relay operations
+        """
+        self.relay_urls = relay_urls
+        self.privkey = privkey
+        self.use_queued_relays = use_queued_relays
+        self.min_relay_interval = min_relay_interval
+
+        # Relay instances
+        self.relay_instances: list[NostrRelay | QueuedNostrRelay] = []
+        self.relay_pool: RelayPool | None = None
+
+        # Rate limiting
+        self._last_relay_operation = 0.0
+
+    async def get_relay_connections(self) -> list[NostrRelay]:
+        """Get relay connections, discovering if needed."""
+        if self.use_queued_relays and self.relay_pool is None:
+            # Try to discover relays
+            discovered_relays = await self.discover_relays()
+            relay_urls = discovered_relays or self.relay_urls
+
+            # Create relay pool with queued support
+            self.relay_pool = RelayPool(
+                relay_urls[:5],  # Use up to 5 relays
+                batch_size=10,
+                batch_interval=0.5,  # Process queue every 0.5 seconds
+                enable_batching=True,
+            )
+
+            # Connect all relays in pool
+            await self.relay_pool.connect_all()
+
+            # For compatibility, add relays to instances list
+            from typing import cast
+
+            self.relay_instances = cast(
+                list[NostrRelay | QueuedNostrRelay], self.relay_pool.relays
+            )
+
+        elif not self.use_queued_relays and not self.relay_instances:
+            # Legacy mode: use regular relays without queuing
+            discovered_relays = await self.discover_relays()
+            relay_urls = discovered_relays or self.relay_urls
+
+            # Try to connect to relays
+            for url in relay_urls[:5]:  # Try up to 5 relays
+                try:
+                    relay = NostrRelay(url)
+                    await relay.connect()
+                    self.relay_instances.append(relay)
+
+                    # Stop after successfully connecting to 3 relays
+                    if len(self.relay_instances) >= 3:
+                        break
+                except Exception:
+                    continue
+
+            if not self.relay_instances:
+                raise RelayError("Could not connect to any relay")
+
+        return self.relay_instances
+
+    async def discover_relays(self) -> list[str]:
+        """Discover relays from kind:10019 events."""
+        from .crypto import get_pubkey
+
+        # Use a well-known relay to bootstrap
+        bootstrap_relay = NostrRelay("wss://relay.damus.io")
+        try:
+            await bootstrap_relay.connect()
+            relays = await bootstrap_relay.fetch_relay_recommendations(
+                get_pubkey(self.privkey)
+            )
+            return relays
+        except Exception:
+            return []
+        finally:
+            await bootstrap_relay.disconnect()
+
+    async def rate_limit_relay_operations(self) -> None:
+        """Apply rate limiting to relay operations."""
+        now = time.time()
+        time_since_last = now - self._last_relay_operation
+        if time_since_last < self.min_relay_interval:
+            await asyncio.sleep(self.min_relay_interval - time_since_last)
+        self._last_relay_operation = time.time()
+
+    def estimate_event_size(self, event: dict) -> int:
+        """Estimate the size of an event in bytes."""
+        return len(json.dumps(event, separators=(",", ":")))
+
+    async def publish_to_relays(
+        self,
+        unsigned_event: dict,
+        *,
+        token_data: dict[str, object] | None = None,
+        priority: int = 0,
+    ) -> str:
+        """Sign and publish event to all relays and return event ID."""
+        from .crypto import sign_event
+
+        # Sign the event
+        signed_event = sign_event(unsigned_event, self.privkey)
+
+        # Apply rate limiting
+        await self.rate_limit_relay_operations()
+
+        # Use relay pool if available for queued publishing
+        if self.use_queued_relays and self.relay_pool:
+            event_dict = NostrEvent(**signed_event)  # type: ignore
+
+            # Determine priority based on event kind
+            if signed_event["kind"] == EventKind.Token:
+                priority = 10  # High priority for token events
+            elif signed_event["kind"] == EventKind.History:
+                priority = 5  # Medium priority for history
+            else:
+                priority = priority or 0
+
+            # Add to queue with token data if provided
+            success = await self.relay_pool.publish_event(
+                event_dict,
+                priority=priority,
+                token_data=token_data,
+                immediate=False,  # Use queue
+            )
+
+            if success:
+                return signed_event["id"]
+            else:
+                raise RelayError("Failed to queue event for publishing")
+
+        # Legacy mode: direct publishing
+        relays = await self.get_relay_connections()
+        event_dict = NostrEvent(**signed_event)  # type: ignore
+
+        # Try to publish to at least one relay
+        published = False
+        errors = []
+
+        for relay in relays:
+            try:
+                if await relay.publish_event(event_dict):
+                    published = True
+                else:
+                    errors.append(f"{relay.url}: Event rejected")
+            except Exception as e:
+                errors.append(f"{relay.url}: {str(e)}")
+                continue
+
+        if not published:
+            # Only log if we can't publish anywhere to avoid log spam
+            error_msg = f"Failed to publish event to any relay. Last error: {errors[-1] if errors else 'Unknown'}"
+            print(f"Warning: {error_msg}")
+            # Don't raise exception - allow operations to continue
+            return signed_event["id"]
+
+        return signed_event["id"]
+
+    def get_pending_proofs(self) -> list[dict[str, object]]:
+        """Get pending proofs from queued token events."""
+        if self.use_queued_relays and self.relay_pool:
+            return self.relay_pool.get_pending_proofs()
+        return []
+
+    async def fetch_wallet_events(self, pubkey: str) -> list[NostrEvent]:
+        """Fetch all wallet-related events for a pubkey."""
+        relays = await self.get_relay_connections()
+
+        all_events: list[NostrEvent] = []
+        event_ids_seen: set[str] = set()
+
+        for relay in relays:
+            try:
+                events = await relay.fetch_wallet_events(pubkey)
+                # Deduplicate events
+                for event in events:
+                    if event["id"] not in event_ids_seen:
+                        all_events.append(event)
+                        event_ids_seen.add(event["id"])
+            except Exception:
+                continue
+
+        return all_events
+
+    async def disconnect_all(self) -> None:
+        """Disconnect all relay connections."""
+        if self.use_queued_relays and self.relay_pool:
+            await self.relay_pool.disconnect_all()
+        else:
+            for relay in self.relay_instances:
+                await relay.disconnect()
