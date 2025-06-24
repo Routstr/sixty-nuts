@@ -40,7 +40,7 @@ async def check_missing_proofs():
                     f"  Found {len(pending_proofs)} pending proofs worth {pending_total} sats"
                 )
                 print(
-                    f"  💡 These proofs are queued for publishing - they may appear soon!"
+                    "  💡 These proofs are queued for publishing - they may appear soon!"
                 )
 
                 # Show breakdown
@@ -49,9 +49,9 @@ async def check_missing_proofs():
                 if len(pending_proofs) > 5:
                     print(f"    ... and {len(pending_proofs) - 5} more")
             else:
-                print(f"  No pending proofs found in relay queue")
+                print("  No pending proofs found in relay queue")
         else:
-            print(f"  Not using queued relays")
+            print("  Not using queued relays")
 
         # 3. Fetch raw events from all relays to check for inconsistencies
         print("\n📡 Checking All Relays for Events:")
@@ -119,7 +119,7 @@ async def check_missing_proofs():
 
         # 5. Compare found proofs vs local state
         total_found_amount = sum(p.get("amount", 0) for p in all_found_proofs)
-        print(f"\n📊 Proof Analysis:")
+        print("\n📊 Proof Analysis:")
         print(
             f"  Total proofs found on relays: {len(all_found_proofs)} worth {total_found_amount} sats"
         )
@@ -131,7 +131,7 @@ async def check_missing_proofs():
         )
 
         # 6. Recovery recommendations
-        print(f"\n🔧 Recovery Recommendations:")
+        print("\n🔧 Recovery Recommendations:")
 
         if pending_proofs:
             print(
@@ -149,16 +149,16 @@ async def check_missing_proofs():
             print(
                 f"  🧹 Run cleanup tool to remove {spent_amount} sats in spent proofs"
             )
-            print(f"     Command: python examples/cleanup_spent_proofs.py")
+            print("     Command: python examples/cleanup_spent_proofs.py")
 
         if parsing_errors > 0:
-            print(f"  🔑 Some events couldn't be decrypted - check NSEC key")
+            print("  🔑 Some events couldn't be decrypted - check NSEC key")
 
-        print(f"\n📋 Next Steps:")
-        print(f"  1. Wait 30 seconds for relay synchronization")
-        print(f"  2. Check balance again: nuts balance --nostr-debug")
-        print(f"  3. If still missing, run: python examples/refresh_proofs.py")
-        print(f"  4. Contact support if proofs are permanently lost")
+        print("\n📋 Next Steps:")
+        print("  1. Wait 30 seconds for relay synchronization")
+        print("  2. Check balance again: nuts balance --nostr-debug")
+        print("  3. If still missing, run: python examples/refresh_proofs.py")
+        print("  4. Contact support if proofs are permanently lost")
 
 
 async def main():

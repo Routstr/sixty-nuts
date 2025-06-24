@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Literal, cast
 
 from coincurve import PrivateKey

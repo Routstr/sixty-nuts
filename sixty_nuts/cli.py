@@ -347,21 +347,21 @@ async def _debug_nostr_state(wallet) -> None:
     console.print("=" * 50)
 
     # 1. Show wallet configuration
-    console.print(f"\n[yellow]📋 Wallet Configuration:[/yellow]")
+    console.print("\n[yellow]📋 Wallet Configuration:[/yellow]")
     console.print(f"  Public Key: {wallet._get_pubkey()}")
     console.print(f"  Configured Relays: {len(wallet.relays)}")
     for i, relay in enumerate(wallet.relays):
         console.print(f"    {i + 1}. {relay}")
 
     # 2. Check relay connectivity
-    console.print(f"\n[yellow]🌐 Relay Connectivity:[/yellow]")
+    console.print("\n[yellow]🌐 Relay Connectivity:[/yellow]")
     try:
         relay_connections = await wallet._get_relay_connections()
         console.print(f"  Connected Relays: {len(relay_connections)}")
 
         # Show relay pool status if using queued relays
         if wallet._use_queued_relays and wallet.relay_pool:
-            console.print(f"  Using Relay Pool: ✅")
+            console.print("  Using Relay Pool: ✅")
             console.print(f"  Pool Size: {len(wallet.relay_pool.relays)}")
             for i, relay in enumerate(wallet.relay_pool.relays):
                 status = (
@@ -371,7 +371,7 @@ async def _debug_nostr_state(wallet) -> None:
                 )
                 console.print(f"    {i + 1}. {relay.url} - {status}")
         else:
-            console.print(f"  Using Individual Relays: ✅")
+            console.print("  Using Individual Relays: ✅")
             for i, relay in enumerate(relay_connections):
                 status = (
                     "🟢 Connected"
@@ -384,7 +384,7 @@ async def _debug_nostr_state(wallet) -> None:
         console.print(f"  ❌ Relay connection error: {e}")
 
     # 3. Fetch raw events from relays
-    console.print(f"\n[yellow]📡 Raw Nostr Events:[/yellow]")
+    console.print("\n[yellow]📡 Raw Nostr Events:[/yellow]")
     try:
         # Get relay connections
         relays = await wallet._get_relay_connections()
@@ -443,7 +443,7 @@ async def _debug_nostr_state(wallet) -> None:
 
         # 4. Analyze events
         if all_events:
-            console.print(f"\n[yellow]📊 Event Analysis:[/yellow]")
+            console.print("\n[yellow]📊 Event Analysis:[/yellow]")
 
             # Group by kind
             events_by_kind: dict[str, list] = {}
@@ -490,11 +490,11 @@ async def _debug_nostr_state(wallet) -> None:
                         except Exception as e:
                             console.print(f"       → Parse error: {e}")
         else:
-            console.print(f"  No events found on any relay")
+            console.print("  No events found on any relay")
 
         # 5. Check relay queue status
         if wallet._use_queued_relays and wallet.relay_pool:
-            console.print(f"\n[yellow]📤 Relay Queue Status:[/yellow]")
+            console.print("\n[yellow]📤 Relay Queue Status:[/yellow]")
             try:
                 pending_proofs = wallet.relay_pool.get_pending_proofs()
                 console.print(f"  Pending Proofs in Queue: {len(pending_proofs)}")
@@ -512,14 +512,14 @@ async def _debug_nostr_state(wallet) -> None:
 
                     console.print(f"  Total Pending Value: {total_pending_sats} sats")
                     console.print(
-                        f"  ⚠️  These sats might be 'missing' until queue is processed!"
+                        "  ⚠️  These sats might be 'missing' until queue is processed!"
                     )
 
             except Exception as e:
                 console.print(f"  ❌ Queue status error: {e}")
 
         # 6. Compare with local state
-        console.print(f"\n[yellow]🔄 Local vs Relay Comparison:[/yellow]")
+        console.print("\n[yellow]🔄 Local vs Relay Comparison:[/yellow]")
         try:
             local_state = await wallet.fetch_wallet_state(check_proofs=False)
             console.print(f"  Local Balance: {local_state.balance} sats")
@@ -532,7 +532,7 @@ async def _debug_nostr_state(wallet) -> None:
                 local_denoms[amount] = local_denoms.get(amount, 0) + 1
 
             if local_denoms:
-                console.print(f"  Local Denominations:")
+                console.print("  Local Denominations:")
                 for denom in sorted(local_denoms.keys(), reverse=True):
                     count = local_denoms[denom]
                     console.print(f"    {denom} sats × {count} = {denom * count} sats")
@@ -1000,7 +1000,7 @@ def status(
                     from datetime import datetime
 
                     created_time = datetime.fromtimestamp(existing_event["created_at"])
-                    console.print(f"[green]✅ Wallet is initialized[/green]")
+                    console.print("[green]✅ Wallet is initialized[/green]")
                     console.print(f"   Created: {created_time}")
                     console.print(f"   Event ID: {existing_event['id'][:16]}...")
 
@@ -1011,7 +1011,7 @@ def status(
 
                         wallet_data = json.loads(content)
 
-                        console.print(f"\n[yellow]📋 Wallet Configuration:[/yellow]")
+                        console.print("\n[yellow]📋 Wallet Configuration:[/yellow]")
                         console.print(f"  Public Key: {wallet_obj._get_pubkey()}")
 
                         mint_count = sum(1 for item in wallet_data if item[0] == "mint")
@@ -1130,7 +1130,7 @@ def erase(
                     nsec_existed = True
                     if not confirm:
                         console.print(
-                            f"\n[yellow]⚠️  Will delete local NSEC storage:[/yellow]"
+                            "\n[yellow]⚠️  Will delete local NSEC storage:[/yellow]"
                         )
                         console.print(f"   🗂️  NSEC file: {NSEC_FILE}")
                         if os.getenv(NSEC_ENV_VAR):
@@ -1318,7 +1318,7 @@ def erase(
                 )
 
                 if clean_tokens:
-                    console.print(f"\n[red]⚠️  Your Nostr balance is now 0 sats[/red]")
+                    console.print("\n[red]⚠️  Your Nostr balance is now 0 sats[/red]")
                     console.print(
                         "   Any tokens you had are no longer accessible from Nostr relays"
                     )
@@ -1478,7 +1478,7 @@ def debug(
 
     async def _debug_wallet_config(wallet_obj):
         """Debug wallet configuration and keys."""
-        console.print(f"\n[yellow]🗂️  Wallet Configuration[/yellow]")
+        console.print("\n[yellow]🗂️  Wallet Configuration[/yellow]")
         console.print(f"  Nostr Public Key: {wallet_obj._get_pubkey()}")
         console.print(
             f"  Wallet Private Key: {wallet_obj.wallet_privkey[:8]}...{wallet_obj.wallet_privkey[-8:]}"
@@ -1532,7 +1532,7 @@ def debug(
 
     async def _debug_nostr_relays(wallet_obj):
         """Debug Nostr relay connectivity and events."""
-        console.print(f"\n[yellow]🌐 Nostr Relay Status[/yellow]")
+        console.print("\n[yellow]🌐 Nostr Relay Status[/yellow]")
         console.print(f"  Configured Relays: {len(wallet_obj.relays)}")
         for i, relay in enumerate(wallet_obj.relays):
             console.print(f"    {i + 1}. {relay}")
@@ -1544,7 +1544,7 @@ def debug(
 
             # Show relay pool status if using queued relays
             if wallet_obj._use_queued_relays and wallet_obj.relay_pool:
-                console.print(f"  Using Relay Pool: ✅")
+                console.print("  Using Relay Pool: ✅")
                 console.print(f"  Pool Size: {len(wallet_obj.relay_pool.relays)}")
                 for i, relay in enumerate(wallet_obj.relay_pool.relays):
                     status = (
@@ -1556,7 +1556,7 @@ def debug(
                     )
                     console.print(f"    {i + 1}. {relay.url} - {status}")
             else:
-                console.print(f"  Using Individual Relays: ✅")
+                console.print("  Using Individual Relays: ✅")
                 for i, relay in enumerate(relay_connections):
                     status = (
                         "🟢 Connected"
@@ -1573,7 +1573,7 @@ def debug(
         relays = await wallet_obj._get_relay_connections()
         pubkey = wallet_obj._get_pubkey()
 
-        console.print(f"\n  Event Counts by Relay:")
+        console.print("\n  Event Counts by Relay:")
         for relay in relays:
             try:
                 events = await relay.fetch_wallet_events(pubkey)
@@ -1590,7 +1590,7 @@ def debug(
 
     async def _debug_balance_proofs(wallet_obj):
         """Debug balance calculation and proof validation."""
-        console.print(f"\n[yellow]💰 Balance & Proof Validation[/yellow]")
+        console.print("\n[yellow]💰 Balance & Proof Validation[/yellow]")
 
         try:
             # Get balance without validation first (faster)
@@ -1611,15 +1611,15 @@ def debug(
             proof_diff = len(state_unvalidated.proofs) - len(state_validated.proofs)
 
             if balance_diff > 0 or proof_diff > 0:
-                console.print(f"  [red]⚠️  Found spent/invalid proofs:[/red]")
+                console.print("  [red]⚠️  Found spent/invalid proofs:[/red]")
                 console.print(f"    Lost Balance: {balance_diff} sats")
                 console.print(f"    Invalid Proofs: {proof_diff}")
             else:
-                console.print(f"  [green]✅ All proofs valid[/green]")
+                console.print("  [green]✅ All proofs valid[/green]")
 
             # Show proof breakdown by mint
             if state_validated.proofs:
-                console.print(f"\n  Proof Breakdown by Mint:")
+                console.print("\n  Proof Breakdown by Mint:")
                 proofs_by_mint = {}
                 for proof in state_validated.proofs:
                     mint_url = proof.get("mint", "unknown")
@@ -1647,7 +1647,7 @@ def debug(
 
     async def _debug_proof_state(wallet_obj):
         """Debug proof state and validation details."""
-        console.print(f"\n[yellow]🔐 Proof State Details[/yellow]")
+        console.print("\n[yellow]🔐 Proof State Details[/yellow]")
 
         try:
             state = await wallet_obj.fetch_wallet_state(check_proofs=False)
@@ -1691,7 +1691,7 @@ def debug(
         """Debug history decryption issues."""
         import json
 
-        console.print(f"\n[yellow]📊 History Decryption Analysis[/yellow]")
+        console.print("\n[yellow]📊 History Decryption Analysis[/yellow]")
 
         try:
             # Get all wallet events to find different keys
@@ -1772,7 +1772,7 @@ def debug(
 
                 if success_rate < 100 and len(wallet_keys) > 1:
                     console.print(
-                        f"  [yellow]💡 Tip: Multiple keys detected. Some history may be from old keys.[/yellow]"
+                        "  [yellow]💡 Tip: Multiple keys detected. Some history may be from old keys.[/yellow]"
                     )
 
         except Exception as e:

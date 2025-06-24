@@ -26,7 +26,6 @@ from .relay import (
 from .crypto import (
     unblind_signature,
     hash_to_curve,
-    create_blinded_messages_for_amount,
     create_blinded_message_with_secret,
     get_mint_pubkey_for_amount,
     decode_nsec,
