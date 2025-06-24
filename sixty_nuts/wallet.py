@@ -339,11 +339,13 @@ class Wallet:
         selected_proofs = await self._select_proofs(
             state.proofs, invoice_amount, target_mint
         )
+        print(selected_proofs)
         # TODO: self.mark_pending_proofs(selected_proofs)
 
         # melt proofs and pay invoice
         mint = self._get_mint(target_mint)
         melt_quote = await mint.create_melt_quote(unit=self.currency, request=invoice)
+        print(melt_quote)
         # TODO: convert selected_proofs to mint format
         # melt_resp = await mint.melt(quote=melt_quote["quote"], inputs=selected_proofs)
 
@@ -941,7 +943,8 @@ class Wallet:
 
             try:
                 # Try to publish again
-                event_id = await self.event_manager.publish_token_event(proofs)  # type: ignore
+                event_id = await self.event_manager.publish_token_event(proofs)
+                print(event_id)
                 print(
                     f"✅ Successfully published proofs for {mint_url} on retry {retry + 1}"
                 )
