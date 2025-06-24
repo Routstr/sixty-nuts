@@ -7,7 +7,8 @@ from typing import cast
 
 from sixty_nuts.crypto import derive_keyset_id, validate_keyset_id
 from sixty_nuts.mint import Mint, MintError
-from sixty_nuts.wallet import TempWallet, ProofDict
+from sixty_nuts.temp import TempWallet
+from sixty_nuts.wallet import ProofDict
 
 
 class TestKeysetIDDerivation:
