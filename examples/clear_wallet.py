@@ -18,7 +18,7 @@ async def clear_wallet():
             return
 
         # Get relay connections and fetch events
-        relays = await wallet._get_relay_connections()
+        relays = await wallet.relay_manager.get_relay_connections()
         pubkey = wallet._get_pubkey()
 
         all_events = []
@@ -61,7 +61,7 @@ async def clear_wallet():
                     print(
                         f"  Attempting to delete event {i + 1}/{len(token_events)} (attempt {attempt + 1})..."
                     )
-                    await wallet.delete_token_event(event["id"])
+                    await wallet.event_manager.delete_token_event(event["id"])
                     successful_deletions += 1
 
                     # Success - reset delay to base level

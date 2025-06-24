@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TypedDict, cast
+from typing import cast
 import base64
 import os
 import json
@@ -22,6 +22,7 @@ from .mint import (
 from .relay import (
     RelayManager,
     EventKind,
+    NostrEvent,
 )
 from .crypto import (
     unblind_signature,
@@ -33,7 +34,8 @@ from .crypto import (
     get_pubkey,
     nip44_decrypt,
 )
-from .events import EventManager, WalletError
+from .types import ProofDict, WalletError
+from .events import EventManager
 
 try:
     import cbor2
@@ -46,19 +48,6 @@ except ModuleNotFoundError:  # pragma: no cover – allow runtime miss
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class ProofDict(TypedDict):
-    """Extended proof structure for NIP-60 wallet use.
-
-    Extends the basic Proof with mint URL tracking for multi-mint support.
-    """
-
-    id: str
-    amount: int
-    secret: str
-    C: str
-    mint: str | None  # Add mint URL tracking
-
-
 @dataclass
 class WalletState:
     """Current wallet state."""
@@ -69,9 +58,6 @@ class WalletState:
     proof_to_event_id: dict[str, str] | None = (
         None  # proof_id -> event_id mapping (TODO)
     )
-
-
-# WalletError is imported from .events
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1673,3 +1659,83 @@ class Wallet:
             "dai",
         ]:
             raise ValueError(f"Unsupported currency unit: {unit}")
+
+    # ───────────────────────── Public Helper Methods ──────────────────────────
+
+    def _get_pubkey(self) -> str:
+        """Get the Nostr public key for this wallet."""
+        return get_pubkey(self._privkey)
+
+    async def check_wallet_event_exists(self) -> tuple[bool, NostrEvent | None]:
+        """Check if a wallet event already exists for this wallet.
+
+        Returns:
+            Tuple of (exists, wallet_event_dict)
+        """
+        return await self.event_manager.check_wallet_event_exists()
+
+    async def initialize_wallet(self, *, force: bool = False) -> bool:
+        """Initialize wallet by checking for existing events or creating new ones.
+
+        Args:
+            force: If True, create wallet event even if one already exists
+
+        Returns:
+            True if wallet was initialized (new event created), False if already existed
+        """
+        return await self.event_manager.initialize_wallet(
+            self.wallet_privkey, force=force
+        )
+
+    async def delete_all_wallet_events(self) -> int:
+        """Delete all wallet events for this wallet.
+
+        Returns:
+            Number of wallet events deleted
+        """
+        return await self.event_manager.delete_all_wallet_events()
+
+    async def fetch_spending_history(self) -> list[dict]:
+        """Fetch and decrypt spending history events.
+
+        Returns:
+            List of spending history entries with metadata
+        """
+        return await self.event_manager.fetch_spending_history()
+
+    async def clear_spending_history(self) -> int:
+        """Delete all spending history events for this wallet.
+
+        Returns:
+            Number of history events deleted
+        """
+        return await self.event_manager.clear_spending_history()
+
+    async def count_token_events(self) -> int:
+        """Count the number of token events for this wallet.
+
+        Returns:
+            Number of token events found
+        """
+        return await self.event_manager.count_token_events()
+
+    async def clear_all_token_events(self) -> int:
+        """Delete all token events for this wallet.
+
+        WARNING: This will delete your actual token storage!
+
+        Returns:
+            Number of token events deleted
+        """
+        return await self.event_manager.clear_all_token_events()
+
+    def _nip44_decrypt(self, content: str) -> str:
+        """Decrypt NIP-44 encrypted content.
+
+        Args:
+            content: Encrypted content to decrypt
+
+        Returns:
+            Decrypted content
+        """
+        return nip44_decrypt(content, self._privkey)

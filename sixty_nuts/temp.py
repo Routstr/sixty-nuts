@@ -1,6 +1,7 @@
 from .crypto import PrivateKey, bech32_decode, convertbits
 from .mint import CurrencyUnit
-from .wallet import Wallet, WalletError
+from .types import WalletError
+from .wallet import Wallet
 
 
 class TempWallet(Wallet):

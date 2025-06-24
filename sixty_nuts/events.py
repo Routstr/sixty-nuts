@@ -8,8 +8,7 @@ from typing import Literal, cast
 
 from coincurve import PrivateKey
 
-from sixty_nuts.wallet import ProofDict
-
+from .types import ProofDict, WalletError
 from .relay import (
     NostrEvent,
     RelayManager,
@@ -21,10 +20,6 @@ from .crypto import (
     nip44_encrypt,
     nip44_decrypt,
 )
-
-
-class WalletError(Exception):
-    """Base class for wallet errors."""
 
 
 class EventManager:

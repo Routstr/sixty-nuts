@@ -32,8 +32,8 @@ async def check_missing_proofs():
 
         # 2. Check relay queue for pending proofs
         print("\n📤 Checking Relay Queue:")
-        if wallet._use_queued_relays and wallet.relay_pool:
-            pending_proofs = wallet.relay_pool.get_pending_proofs()
+        if wallet.relay_manager.use_queued_relays and wallet.relay_manager.relay_pool:
+            pending_proofs = wallet.relay_manager.relay_pool.get_pending_proofs()
             if pending_proofs:
                 pending_total = sum(p.get("amount", 0) for p in pending_proofs)
                 print(
@@ -55,7 +55,7 @@ async def check_missing_proofs():
 
         # 3. Fetch raw events from all relays to check for inconsistencies
         print("\n📡 Checking All Relays for Events:")
-        relays = await wallet._get_relay_connections()
+        relays = await wallet.relay_manager.get_relay_connections()
         all_token_events = []
 
         for i, relay in enumerate(relays):
@@ -64,9 +64,13 @@ async def check_missing_proofs():
 
                 # Fetch token events
                 token_events = await relay.fetch_events(
-                    authors=[wallet._get_pubkey()],
-                    kinds=[7375],  # Token events
-                    limit=50,
+                    [
+                        {
+                            "authors": [wallet._get_pubkey()],
+                            "kinds": [7375],  # Token events
+                            "limit": 50,
+                        }
+                    ]
                 )
 
                 print(f"    Found {len(token_events)} token events")

@@ -85,10 +85,9 @@ async def move_between_mints(
 
         # Swap to target mint
         print("Swapping to target mint...")
-        received, unit = await wallet.swap_mints(token, target_mint=to_mint)
-
-        print(f"✅ Successfully moved {received} {unit}")
-        print(f"   (Fees: {amount - received} {unit})")
+        # Note: swap_mints is not implemented yet, using redeem for now
+        received, unit = await wallet.redeem(token)
+        print(f"✅ Redeemed {received} {unit} (mint swapping not yet implemented)")
 
     except Exception as e:
         print(f"❌ Transfer failed: {e}")
@@ -102,7 +101,9 @@ async def add_new_mint(wallet: Wallet, mint_url: str):
         wallet.mint_urls.append(mint_url)
 
         # Update wallet event with new mint
-        await wallet.create_wallet_event()
+        await wallet.event_manager.create_wallet_event(
+            wallet.wallet_privkey, force=True
+        )
         print("✅ Mint added and wallet updated")
     else:
         print("ℹ️  Mint already in wallet")
@@ -144,11 +145,11 @@ async def consolidate_to_primary_mint(wallet: Wallet):
                 token = wallet._serialize_proofs_for_token(proofs, mint_url)
 
                 # Swap to primary mint
-                received, unit = await wallet.swap_mints(
-                    token, target_mint=primary_mint
+                # Note: swap_mints is not implemented yet, using redeem for now
+                received, unit = await wallet.redeem(token)
+                print(
+                    f"  ✅ Redeemed {received} {unit} (mint swapping not yet implemented)"
                 )
-
-                print(f"  ✅ Moved {received} {unit}")
                 total_moved += received
 
             except Exception as e:

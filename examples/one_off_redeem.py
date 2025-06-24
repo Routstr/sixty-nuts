@@ -7,7 +7,8 @@ Perfect for redeeming tokens directly to a Lightning Address.
 
 import asyncio
 import sys
-from sixty_nuts.wallet import TempWallet, redeem_to_lnurl, WalletError
+from sixty_nuts.types import WalletError
+from sixty_nuts.temp import TempWallet, redeem_to_lnurl
 
 
 async def redeem_with_temp_wallet(token: str, lightning_address: str):

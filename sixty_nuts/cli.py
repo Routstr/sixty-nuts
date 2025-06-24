@@ -15,12 +15,15 @@ from rich.panel import Panel
 
 try:
     import qrcode  # type: ignore
+    import qrcode.constants  # type: ignore
 
     HAS_QRCODE = True
 except ImportError:
     HAS_QRCODE = False
 
-from .wallet import Wallet, WalletError, redeem_to_lnurl
+from .types import WalletError
+from .wallet import Wallet
+from .temp import redeem_to_lnurl
 
 app = typer.Typer(
     name="nuts",
@@ -453,7 +456,8 @@ async def _debug_nostr_state(wallet) -> None:
                     events_by_kind[kind] = []
                 events_by_kind[kind].append(event)
 
-            for kind, events in events_by_kind.items():
+            for kind_str, events in events_by_kind.items():
+                kind = int(kind_str) if isinstance(kind_str, str) else kind_str
                 kind_name = {17375: "Wallet", 7375: "Token", 7376: "History"}.get(
                     kind, f"Kind {kind}"
                 )

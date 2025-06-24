@@ -6,7 +6,8 @@ Simple example showing how to redeem a Cashu token and add it to your wallet bal
 
 import asyncio
 import sys
-from sixty_nuts.wallet import Wallet, WalletError
+from sixty_nuts.types import WalletError
+from sixty_nuts.wallet import Wallet
 
 
 async def redeem_token(wallet: Wallet, token: str):

@@ -115,11 +115,23 @@ async def refresh_proofs(wallet: Wallet):
                 keyset_id = str(active_keysets[0]["id"])
 
                 # Create blinded messages for the same amount (prefer consolidation)
-                outputs, secrets, blinding_factors = (
-                    wallet._create_blinded_messages_for_amount(
-                        batch_balance, keyset_id, prefer_large_denominations=True
-                    )
-                )
+                from sixty_nuts.crypto import create_blinded_message_with_secret
+
+                outputs = []
+                secrets = []
+                blinding_factors = []
+
+                # Calculate optimal denominations for better consolidation
+                optimal_denoms = wallet._calculate_optimal_denominations(batch_balance)
+
+                for denomination, count in sorted(optimal_denoms.items()):
+                    for _ in range(count):
+                        secret, r_hex, blinded_msg = create_blinded_message_with_secret(
+                            denomination, keyset_id
+                        )
+                        outputs.append(blinded_msg)
+                        secrets.append(secret)
+                        blinding_factors.append(r_hex)
 
                 print(f"  Swapping for {len(outputs)} new proofs...")
 
@@ -147,7 +159,9 @@ async def refresh_proofs(wallet: Wallet):
                 for i, sig in enumerate(swap_resp["signatures"]):
                     # Get the public key for this amount
                     amount = sig["amount"]
-                    mint_pubkey = wallet._get_mint_pubkey_for_amount(mint_keys, amount)
+                    from sixty_nuts.crypto import get_mint_pubkey_for_amount
+
+                    mint_pubkey = get_mint_pubkey_for_amount(mint_keys, amount)
                     if not mint_pubkey:
                         print(
                             f"  ⚠️  Could not find mint public key for amount {amount}"
@@ -211,7 +225,7 @@ async def refresh_proofs(wallet: Wallet):
                     print(f"  Deleting {len(events_to_delete)} old token events...")
                     await asyncio.sleep(0.5)  # Give relays time to process deletes
 
-                await wallet.publish_token_event(
+                await wallet.event_manager.publish_token_event(
                     all_new_proofs,
                     deleted_token_ids=list(events_to_delete)
                     if events_to_delete
