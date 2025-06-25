@@ -13,3 +13,4 @@ wheels/
 .cashu
 .pypirc
 proof_backups/
+tests/.relay/data/**
