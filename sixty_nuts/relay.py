@@ -215,6 +215,7 @@ class NostrRelay:
         self.url = url
         self.ws: Any = None
         self.subscriptions: dict[str, Callable[[NostrEvent], None]] = {}
+        self._recv_lock = asyncio.Lock()  # Prevent concurrent recv() calls
 
     async def connect(self) -> None:
         """Connect to the relay."""
@@ -246,11 +247,12 @@ class NostrRelay:
         await self.ws.send(json.dumps(message))
 
     async def _recv(self) -> list[Any]:
-        """Receive a message from the relay."""
-        if not self.ws or self.ws.close_code is not None:
-            raise RelayError("Not connected to relay")
-        data = await self.ws.recv()
-        return json.loads(data)
+        """Receive a message from the relay with concurrency protection."""
+        async with self._recv_lock:
+            if not self.ws or self.ws.close_code is not None:
+                raise RelayError("Not connected to relay")
+            data = await self.ws.recv()
+            return json.loads(data)
 
     # ───────────────────────── Publishing Events ─────────────────────────────────
 
@@ -511,7 +513,7 @@ class QueuedNostrRelay(NostrRelay):
                     # Process each event
                     for queued_event in batch:
                         try:
-                            success = await super().publish_event(queued_event.event)
+                            success = await self._publish_to_relays(queued_event.event)
 
                             if success:
                                 # Remove from pending caches
@@ -543,6 +545,10 @@ class QueuedNostrRelay(NostrRelay):
             except Exception as e:
                 print(f"Queue processor error: {e}")
                 await asyncio.sleep(1)  # Avoid tight error loop
+
+    async def _publish_to_relays(self, event: NostrEvent) -> bool:
+        """Publish event to this relay."""
+        return await super().publish_event(event)
 
     async def publish_event(
         self,
@@ -630,10 +636,12 @@ class RelayPool:
 
     async def connect_all(self) -> None:
         """Connect and start all relays."""
-        for relay in self.relays:
+        for i, relay in enumerate(self.relays):
             try:
                 await relay.connect()
-                await relay.start_queue_processor()
+                # Only start queue processor for the first relay to avoid concurrent processing
+                if i == 0:
+                    await relay.start_queue_processor()
             except Exception as e:
                 print(f"Failed to connect relay {relay.url}: {e}")
 
