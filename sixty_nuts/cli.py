@@ -341,7 +341,7 @@ def handle_wallet_error(e: Exception) -> None:
         console.print(f"[red]❌ Error: {e}[/red]")
 
 
-async def _debug_nostr_state(wallet) -> None:
+async def _debug_nostr_state(wallet: Wallet) -> None:
     """Debug Nostr relay state and proof storage."""
     from datetime import datetime
     import json
@@ -359,29 +359,33 @@ async def _debug_nostr_state(wallet) -> None:
     # 2. Check relay connectivity
     console.print("\n[yellow]🌐 Relay Connectivity:[/yellow]")
     try:
-        relay_connections = await wallet._get_relay_connections()
+        relay_connections = await wallet.relay_manager.get_relay_connections()
         console.print(f"  Connected Relays: {len(relay_connections)}")
 
         # Show relay pool status if using queued relays
-        if wallet._use_queued_relays and wallet.relay_pool:
+        if wallet.relay_manager.use_queued_relays and wallet.relay_manager.relay_pool:
             console.print("  Using Relay Pool: ✅")
-            console.print(f"  Pool Size: {len(wallet.relay_pool.relays)}")
-            for i, relay in enumerate(wallet.relay_pool.relays):
+            console.print(f"  Pool Size: {len(wallet.relay_manager.relay_pool.relays)}")
+            for i, pool_relay in enumerate(wallet.relay_manager.relay_pool.relays):
                 status = (
                     "🟢 Connected"
-                    if hasattr(relay, "ws") and relay.ws and relay.ws.close_code is None
+                    if hasattr(pool_relay, "ws")
+                    and pool_relay.ws
+                    and pool_relay.ws.close_code is None
                     else "🔴 Disconnected"
                 )
-                console.print(f"    {i + 1}. {relay.url} - {status}")
+                console.print(f"    {i + 1}. {pool_relay.url} - {status}")
         else:
             console.print("  Using Individual Relays: ✅")
-            for i, relay in enumerate(relay_connections):
+            for i, individual_relay in enumerate(relay_connections):
                 status = (
                     "🟢 Connected"
-                    if hasattr(relay, "ws") and relay.ws and relay.ws.close_code is None
+                    if hasattr(individual_relay, "ws")
+                    and individual_relay.ws
+                    and individual_relay.ws.close_code is None
                     else "🔴 Disconnected"
                 )
-                console.print(f"    {i + 1}. {relay.url} - {status}")
+                console.print(f"    {i + 1}. {individual_relay.url} - {status}")
 
     except Exception as e:
         console.print(f"  ❌ Relay connection error: {e}")
@@ -390,44 +394,26 @@ async def _debug_nostr_state(wallet) -> None:
     console.print("\n[yellow]📡 Raw Nostr Events:[/yellow]")
     try:
         # Get relay connections
-        relays = await wallet._get_relay_connections()
+        relays = await wallet.relay_manager.get_relay_connections()
         all_events = []
 
-        for relay in relays:
+        for relay_conn in relays:
             try:
-                console.print(f"\n  Fetching from {relay.url}...")
+                console.print(f"\n  Fetching from {relay_conn.url}...")
 
                 # Fetch wallet events using the correct API
-                wallet_events = await relay.fetch_events(
-                    [
-                        {
-                            "authors": [wallet._get_pubkey()],
-                            "kinds": [17375],  # Wallet metadata
-                            "limit": 5,
-                        }
-                    ]
+                wallet_events = await relay_conn.fetch_wallet_events(
+                    wallet._get_pubkey(), kinds=[17375]
                 )
 
                 # Fetch token events
-                token_events = await relay.fetch_events(
-                    [
-                        {
-                            "authors": [wallet._get_pubkey()],
-                            "kinds": [7375],  # Token events
-                            "limit": 20,
-                        }
-                    ]
+                token_events = await relay_conn.fetch_wallet_events(
+                    wallet._get_pubkey(), kinds=[7375]
                 )
 
                 # Fetch history events
-                history_events = await relay.fetch_events(
-                    [
-                        {
-                            "authors": [wallet._get_pubkey()],
-                            "kinds": [7376],  # History events
-                            "limit": 10,
-                        }
-                    ]
+                history_events = await relay_conn.fetch_wallet_events(
+                    wallet._get_pubkey(), kinds=[7376]
                 )
 
                 events_found = (
@@ -442,7 +428,7 @@ async def _debug_nostr_state(wallet) -> None:
                 all_events.extend(history_events)
 
             except Exception as e:
-                console.print(f"    ❌ Error fetching from {relay.url}: {e}")
+                console.print(f"    ❌ Error fetching from {relay_conn.url}: {e}")
 
         # 4. Analyze events
         if all_events:
@@ -452,9 +438,10 @@ async def _debug_nostr_state(wallet) -> None:
             events_by_kind: dict[str, list] = {}
             for event in all_events:
                 kind = event.get("kind", "unknown")
-                if kind not in events_by_kind:
-                    events_by_kind[kind] = []
-                events_by_kind[kind].append(event)
+                kind_str = str(kind)
+                if kind_str not in events_by_kind:
+                    events_by_kind[kind_str] = []
+                events_by_kind[kind_str].append(event)
 
             for kind_str, events in events_by_kind.items():
                 kind = int(kind_str) if isinstance(kind_str, str) else kind_str
@@ -497,10 +484,10 @@ async def _debug_nostr_state(wallet) -> None:
             console.print("  No events found on any relay")
 
         # 5. Check relay queue status
-        if wallet._use_queued_relays and wallet.relay_pool:
+        if wallet.relay_manager.use_queued_relays and wallet.relay_manager.relay_pool:
             console.print("\n[yellow]📤 Relay Queue Status:[/yellow]")
             try:
-                pending_proofs = wallet.relay_pool.get_pending_proofs()
+                pending_proofs = wallet.relay_manager.relay_pool.get_pending_proofs()
                 console.print(f"  Pending Proofs in Queue: {len(pending_proofs)}")
 
                 if pending_proofs:
@@ -1480,7 +1467,7 @@ def debug(
         except Exception as e:
             handle_wallet_error(e)
 
-    async def _debug_wallet_config(wallet_obj):
+    async def _debug_wallet_config(wallet_obj: Wallet) -> None:
         """Debug wallet configuration and keys."""
         console.print("\n[yellow]🗂️  Wallet Configuration[/yellow]")
         console.print(f"  Nostr Public Key: {wallet_obj._get_pubkey()}")
@@ -1503,7 +1490,7 @@ def debug(
             )
 
             # Check for multiple wallet events
-            relays = await wallet_obj._get_relay_connections()
+            relays = await wallet_obj.relay_manager.get_relay_connections()
             pubkey = wallet_obj._get_pubkey()
 
             all_events = []
@@ -1534,7 +1521,7 @@ def debug(
         else:
             console.print("  [red]❌ No wallet event found[/red]")
 
-    async def _debug_nostr_relays(wallet_obj):
+    async def _debug_nostr_relays(wallet_obj: Wallet) -> None:
         """Debug Nostr relay connectivity and events."""
         console.print("\n[yellow]🌐 Nostr Relay Status[/yellow]")
         console.print(f"  Configured Relays: {len(wallet_obj.relays)}")
@@ -1543,54 +1530,61 @@ def debug(
 
         # Check relay connectivity
         try:
-            relay_connections = await wallet_obj._get_relay_connections()
+            relay_connections = await wallet_obj.relay_manager.get_relay_connections()
             console.print(f"  Connected Relays: {len(relay_connections)}")
 
             # Show relay pool status if using queued relays
-            if wallet_obj._use_queued_relays and wallet_obj.relay_pool:
+            if (
+                wallet_obj.relay_manager.use_queued_relays
+                and wallet_obj.relay_manager.relay_pool
+            ):
                 console.print("  Using Relay Pool: ✅")
-                console.print(f"  Pool Size: {len(wallet_obj.relay_pool.relays)}")
-                for i, relay in enumerate(wallet_obj.relay_pool.relays):
+                console.print(
+                    f"  Pool Size: {len(wallet_obj.relay_manager.relay_pool.relays)}"
+                )
+                for i, pool_relay in enumerate(
+                    wallet_obj.relay_manager.relay_pool.relays
+                ):
                     status = (
                         "🟢 Connected"
-                        if hasattr(relay, "ws")
-                        and relay.ws
-                        and relay.ws.close_code is None
+                        if hasattr(pool_relay, "ws")
+                        and pool_relay.ws
+                        and pool_relay.ws.close_code is None
                         else "🔴 Disconnected"
                     )
-                    console.print(f"    {i + 1}. {relay.url} - {status}")
+                    console.print(f"    {i + 1}. {pool_relay.url} - {status}")
             else:
                 console.print("  Using Individual Relays: ✅")
-                for i, relay in enumerate(relay_connections):
+                for i, individual_relay in enumerate(relay_connections):
                     status = (
                         "🟢 Connected"
-                        if hasattr(relay, "ws")
-                        and relay.ws
-                        and relay.ws.close_code is None
+                        if hasattr(individual_relay, "ws")
+                        and individual_relay.ws
+                        and individual_relay.ws.close_code is None
                         else "🔴 Disconnected"
                     )
-                    console.print(f"    {i + 1}. {relay.url} - {status}")
+                    console.print(f"    {i + 1}. {individual_relay.url} - {status}")
         except Exception as e:
             console.print(f"  ❌ Relay connection error: {e}")
 
         # Event counts by relay
-        relays = await wallet_obj._get_relay_connections()
+        relays = await wallet_obj.relay_manager.get_relay_connections()
         pubkey = wallet_obj._get_pubkey()
 
         console.print("\n  Event Counts by Relay:")
-        for relay in relays:
+        for relay_conn in relays:
             try:
-                events = await relay.fetch_wallet_events(pubkey)
+                events = await relay_conn.fetch_wallet_events(pubkey)
                 wallet_events = [e for e in events if e["kind"] == 17375]
                 token_events = [e for e in events if e["kind"] == 7375]
                 history_events = [e for e in events if e["kind"] == 7376]
 
                 total = len(wallet_events) + len(token_events) + len(history_events)
                 console.print(
-                    f"    {relay.url}: {total} events (W:{len(wallet_events)} T:{len(token_events)} H:{len(history_events)})"
+                    f"    {relay_conn.url}: {total} events (W:{len(wallet_events)} T:{len(token_events)} H:{len(history_events)})"
                 )
             except Exception as e:
-                console.print(f"    {relay.url}: ❌ Error: {e}")
+                console.print(f"    {relay_conn.url}: ❌ Error: {e}")
 
     async def _debug_balance_proofs(wallet_obj):
         """Debug balance calculation and proof validation."""
@@ -1691,7 +1685,7 @@ def debug(
         except Exception as e:
             console.print(f"  ❌ Proof state error: {e}")
 
-    async def _debug_history_decryption(wallet_obj):
+    async def _debug_history_decryption(wallet_obj: Wallet) -> None:
         """Debug history decryption issues."""
         import json
 
@@ -1699,7 +1693,7 @@ def debug(
 
         try:
             # Get all wallet events to find different keys
-            relays = await wallet_obj._get_relay_connections()
+            relays = await wallet_obj.relay_manager.get_relay_connections()
             pubkey = wallet_obj._get_pubkey()
 
             all_events = []
