@@ -687,7 +687,7 @@ def send(
 
                 console.print("\n[green]✅ Cashu Token Created:[/green]")
                 # Display token without line wrapping for easy copying
-                console.print(token, soft_wrap=False, no_wrap=True, overflow="ignore")
+                console.print(token, soft_wrap=True, no_wrap=True)
 
                 # Display QR code unless disabled
                 if not no_qr:
@@ -1326,6 +1326,110 @@ def erase(
             handle_wallet_error(e)
 
     asyncio.run(_erase())
+
+
+@app.command()
+def cleanup(
+    mint_urls: Annotated[
+        Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Show what would be cleaned up without making changes"
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
+) -> None:
+    """Clean up wallet state by consolidating old/corrupted token events.
+
+    This command identifies undecryptable or empty token events and consolidates
+    all valid proofs into fresh events. This is useful for wallets that have
+    accumulated many old events due to encryption key changes or corrupted data.
+
+    The cleanup uses the NIP-60 'del' field mechanism to mark old events as
+    superseded, making it work even on relays that don't support deletion events.
+    """
+
+    async def _cleanup():
+        try:
+            nsec = get_nsec()
+            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+                # Get current state for confirmation
+                current_balance = await wallet.get_balance(check_proofs=False)
+                token_count = await wallet.count_token_events()
+
+                console.print("[cyan]🧹 Wallet Cleanup Tool[/cyan]")
+                console.print(f"Current balance: {current_balance} sats")
+                console.print(f"Current token events: {token_count}")
+
+                if not dry_run and not confirm:
+                    console.print(
+                        "\n[yellow]This will consolidate old/corrupted events into fresh ones.[/yellow]"
+                    )
+                    console.print(
+                        "[yellow]Old events will be marked as superseded using NIP-60 'del' fields.[/yellow]"
+                    )
+                    console.print(
+                        "[yellow]Your balance and proofs will remain unchanged.[/yellow]"
+                    )
+
+                    confirm_cleanup = Prompt.ask(
+                        "\nProceed with cleanup?", choices=["yes", "no"], default="no"
+                    )
+
+                    if confirm_cleanup != "yes":
+                        console.print("[yellow]❌ Cleanup cancelled[/yellow]")
+                        return
+
+                # Perform cleanup
+                stats = await wallet.cleanup_wallet_state(dry_run=dry_run)
+
+                # Show results
+                console.print("\n[green]📋 Cleanup Results:[/green]")
+                console.print(f"   Total events analyzed: {stats['total_events']}")
+                console.print(f"   Valid events: {stats['valid_events']}")
+                console.print(
+                    f"   Undecryptable events: {stats['undecryptable_events']}"
+                )
+                console.print(f"   Empty events: {stats['empty_events']}")
+                console.print(f"   Valid proofs: {stats['valid_proofs']}")
+                console.print(f"   Balance: {stats['balance']} sats")
+
+                if not dry_run:
+                    console.print(
+                        f"   Events consolidated: {stats['events_consolidated']}"
+                    )
+                    console.print(
+                        f"   Events marked superseded: {stats['events_marked_superseded']}"
+                    )
+
+                    if stats["events_consolidated"] > 0:
+                        console.print(
+                            "\n[green]🎉 Successfully consolidated wallet state![/green]"
+                        )
+                        console.print(
+                            "[cyan]Your wallet should now have cleaner state and faster syncing.[/cyan]"
+                        )
+                    else:
+                        console.print(
+                            "\n[green]✅ No cleanup needed - wallet state is already optimized.[/green]"
+                        )
+                else:
+                    console.print(
+                        "\n[cyan]ℹ️  This was a dry run - no changes were made.[/cyan]"
+                    )
+                    if stats["undecryptable_events"] + stats["empty_events"] >= 5:
+                        console.print(
+                            "[yellow]Run without --dry-run to perform actual cleanup.[/yellow]"
+                        )
+
+        except Exception as e:
+            handle_wallet_error(e)
+
+    asyncio.run(_cleanup())
 
 
 @app.command()
