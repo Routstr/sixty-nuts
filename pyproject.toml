@@ -46,13 +46,26 @@ nuts = "sixty_nuts.cli:cli"
 dev = ["mypy>=1.16.0", "pytest-asyncio>=1.0.0", "ruff>=0.11.12"]
 
 [tool.pytest.ini_options]
+# Test discovery and collection
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+# Async test configuration
 asyncio_mode = "auto"
 pythonpath = ["."]
-markers = ["asyncio: mark test as async"]
+
+# Test markers
+markers = [
+    "asyncio: mark test as async",
+    "integration: marks tests as integration tests (require Docker services)",
+    "unit: marks tests as unit tests (no external dependencies)",
+    "slow: marks tests as slow running",
+]
+
+# By default, only run unit tests unless RUN_INTEGRATION_TESTS is set
+# Integration tests are skipped via pytest.mark.skipif in the test files
 
 [build-system]
 requires = ["hatchling"]

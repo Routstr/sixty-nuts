@@ -142,7 +142,7 @@ async def consolidate_to_primary_mint(wallet: Wallet):
             print(f"\n  Moving {balance} sats from {mint_url}")
             try:
                 # Create token with all proofs from this mint
-                token = wallet._serialize_proofs_for_token(proofs, mint_url)
+                token = wallet._serialize_proofs_for_token(proofs, mint_url, 4)
 
                 # Swap to primary mint
                 # Note: swap_mints is not implemented yet, using redeem for now

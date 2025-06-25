@@ -303,3 +303,170 @@ if __name__ == "__main__":
 ## License
 
 MIT
+
+## Testing
+
+This project has comprehensive test coverage with both unit tests and integration tests.
+
+### Running Unit Tests
+
+Unit tests don't require external services and run quickly:
+
+```bash
+# Run all unit tests
+pytest tests/unit/ -v
+
+# Run specific test file
+pytest tests/unit/test_wallet.py -v
+
+# Run with coverage
+pytest tests/unit/ --cov=sixty_nuts --cov-report=html
+```
+
+### Running Integration Tests
+
+Integration tests verify complete wallet functionality against real services. They require Docker to run fresh mint and relay instances.
+
+#### Method 1: Automated Script (Recommended)
+
+```bash
+# Run the integration tests with docker compose
+python tests/run_integration.py
+```
+
+This script will:
+
+1. Start fresh Docker containers (Cashu mint + Nostr relay)
+2. Wait for services to be ready
+3. Run all integration tests
+4. Clean up containers afterward
+
+#### Method 2: Manual Control
+
+```bash
+# Start Docker services
+docker-compose up -d
+
+# Run integration tests (in another terminal)
+RUN_INTEGRATION_TESTS=1 pytest tests/integration/ -v
+
+# Clean up
+docker-compose down -v
+```
+
+### Test Architecture
+
+- **Unit Tests** (`tests/unit/`): Fast, isolated tests with no external dependencies
+- **Integration Tests** (`tests/integration/`): End-to-end tests against real services
+- **Environment Variable Gating**: Integration tests only run when `RUN_INTEGRATION_TESTS=1`
+- **Fresh State**: Each integration test run uses clean Docker containers
+
+### Test Categories
+
+Integration tests cover:
+
+- **Basic Operations**: Wallet creation, initialization, balance checking
+- **Minting**: Lightning invoice creation and payment handling  
+- **Transactions**: Sending and redeeming tokens with fee handling
+- **Proof Management**: Validation, consolidation, and state management
+- **Multi-mint**: Operations across different mint instances
+- **Error Handling**: Edge cases and failure scenarios
+
+### CI/CD Integration
+
+```yaml
+# Example GitHub Actions workflow
+- name: Run Unit Tests
+  run: pytest tests/unit/ -v
+
+- name: Run Integration Tests  
+  run: |
+    docker-compose up -d
+    RUN_INTEGRATION_TESTS=1 pytest tests/integration/ -v
+    docker-compose down -v
+```
+
+## Development
+
+### Project Structure
+
+```
+sixty_nuts/
+├── __init__.py          # Package initialization
+├── wallet.py            # Main wallet implementation
+├── mint.py              # Cashu mint client
+├── relay.py             # Nostr relay client  
+├── crypto.py            # Cryptographic primitives
+├── events.py            # NIP-60 event management
+├── types.py             # Type definitions
+└── cli.py               # Command-line interface
+
+tests/
+├── unit/                # Unit tests (fast, no external deps)
+├── integration/         # Integration tests (require Docker)
+└── conftest.py          # Pytest configuration
+
+scripts/
+└── run_integration_tests.py  # Integration test orchestration
+```
+
+### Adding Features
+
+1. **Write unit tests first** for new functionality
+2. **Add integration tests** for end-to-end flows
+3. **Update type hints** for all new code
+4. **Follow NIP-60 specification** for Nostr integration
+5. **Maintain backward compatibility** for existing APIs
+
+### Code Quality
+
+```bash
+# Type checking
+mypy sixty_nuts/
+
+# Linting  
+ruff check sixty_nuts/
+
+# Formatting
+ruff format sixty_nuts/
+```
+
+## Architecture
+
+### NIP-60 Implementation
+
+- **Wallet Events**: Metadata stored in replaceable Nostr events (kind 17375)
+- **Token Events**: Ecash proofs stored in Nostr events (kind 7375)
+- **History Events**: Optional transaction history (kind 7376)
+- **Event Encryption**: All sensitive data encrypted with NIP-44
+
+### Multi-mint Strategy
+
+- **Primary Mint**: Default mint for new operations
+- **Auto-swapping**: Tokens from untrusted mints automatically swapped to primary
+- **Fee Optimization**: Intelligent proof selection to minimize fees
+
+### Proof Management
+
+- **State Validation**: Proofs validated against mint before use
+- **Denomination Optimization**: Automatic proof splitting for optimal denominations
+- **Backup & Recovery**: All proofs backed up to Nostr relays
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Submit a pull request
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Related Projects
+
+- [Cashu Protocol](https://cashu.space) - Chaumian ecash protocol
+- [NIP-60](https://github.com/nostr-protocol/nips/blob/master/60.md) - Cashu Wallet specification
+- [Nostr Protocol](https://nostr.com) - Decentralized social protocol
+- [Routstr](https://github.com/routstr) - Decentralized llm routing protocol
