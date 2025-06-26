@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from collections import deque
 import asyncio
+from contextlib import asynccontextmanager
 
 import websockets
 from coincurve import PrivateKey
@@ -220,7 +221,6 @@ async def publish_relay_list_nip65(relays: list[str], privkey: PrivateKey) -> bo
 
     # Try to publish to bootstrap relays
     published_count = 0
-    total_relays = len(BOOTSTRAP_RELAYS)
 
     for bootstrap_url in BOOTSTRAP_RELAYS:
         try:
@@ -565,8 +565,6 @@ async def get_relays_for_wallet(
 # This approach allows the package (and its test-suite) to execute on Python
 # 3.10 and earlier without modifications, while still benefiting from native
 # timeouts on 3.11+.
-
-from contextlib import asynccontextmanager
 
 
 if not hasattr(asyncio, "timeout"):
