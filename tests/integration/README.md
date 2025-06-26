@@ -314,9 +314,11 @@ Tests mint API methods against real mint services.
 
 - Uses fresh generated nsec keys for each test run
 - Tests against real public relays (no mocking)
-- Handles rate limiting gracefully
+- Handles rate limiting gracefully with `pytest.skip()`
 - Comprehensive coverage of both relay.py and events.py
 - Tests both successful operations and error conditions
+- Robust error detection for relay-specific responses
+- Automatic fallback when relays are unavailable or rate limited
 
 #### Running
 
@@ -332,7 +334,9 @@ RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_relay_lookup.py:
 RUN_INTEGRATION_TESTS=1 python tests/integration/test_relay_lookup.py
 ```
 
-The tests are designed to be robust against public relay quirks including rate limiting, temporary unavailability, and varying relay policies.
+The tests are designed to be robust against public relay quirks including rate limiting, temporary unavailability, and varying relay policies. Tests that encounter rate limiting will skip gracefully rather than fail, as this is expected behavior when using public infrastructure.
+
+**Expected Results:** ~21 passed, ~3 skipped (due to rate limiting), 0 failed
 
 ### test_wallet_complete_flow.py
 
