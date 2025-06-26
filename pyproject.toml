@@ -35,9 +35,11 @@ dependencies = [
     "cryptography>=45.0.3",
     "cbor2>=5.6.5",
     "typer>=0.16.0",
-    "qrcode>=8",
 ]
 urls = { "Repository" = "https://github.com/shroominic/sixty-nuts" }
+
+[project.optional-dependencies]
+qr = ["qrcode>=8.0"]
 
 [project.scripts]
 nuts = "sixty_nuts.cli:cli"
