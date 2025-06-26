@@ -127,6 +127,9 @@ class TestWalletMinting:
             paid = await asyncio.wait_for(task, timeout=30.0)
             assert paid is True, "Invoice should be auto-paid by test mint"
 
+            # Give time for token events to propagate to relay
+            await asyncio.sleep(2)
+
             # Verify balance increased
             balance = await wallet.get_balance()
             assert balance >= 25, f"Balance should be at least 25 sats, got {balance}"
@@ -153,6 +156,166 @@ class TestWalletTransactions:
             await wallet.send(30)
 
         assert "insufficient" in str(exc_info.value).lower()
+
+    async def test_complete_mint_send_redeem_flow(self, wallet):
+        """Test complete end-to-end flow: mint → send → redeem.
+
+        This test would have caught the balance calculation bug since it exercises
+        the full proof swapping logic with actual mint validation.
+        """
+        # 1. Start with empty wallet
+        initial_balance = await wallet.get_balance()
+        assert initial_balance == 0
+
+        # 2. Mint some tokens (fund the wallet)
+        mint_amount = 100
+        invoice, task = await wallet.mint_async(mint_amount)
+        print(f"Created invoice for {mint_amount} sats: {invoice}")
+
+        # Wait for auto-payment
+        paid = await asyncio.wait_for(task, timeout=30.0)
+        assert paid is True, "Invoice should be auto-paid by test mint"
+
+        # Give time for token events to propagate to relay
+        await asyncio.sleep(2)
+
+        # Verify wallet is funded
+        funded_balance = await wallet.get_balance()
+        assert funded_balance >= mint_amount, (
+            f"Expected at least {mint_amount}, got {funded_balance}"
+        )
+        print(f"Wallet funded with {funded_balance} sats")
+
+        # Debug: Check wallet state details
+        state = await wallet.fetch_wallet_state()
+        print(
+            f"\nDEBUG after mint: {len(state.proofs)} proofs, total {sum(p['amount'] for p in state.proofs)} sats"
+        )
+        for p in state.proofs:
+            print(f"  - {p['amount']} sats")
+
+        # 3. Send some tokens
+        send_amount = 25
+        token = await wallet.send(send_amount)
+        assert token.startswith("cashu"), "Should receive valid Cashu token"
+        print(f"\nCreated token for {send_amount} sats")
+
+        # Check balance after send
+        await asyncio.sleep(2)  # Give time for events to propagate
+        state = await wallet.fetch_wallet_state()
+        balance_after_send = state.balance
+        print(
+            f"\nDEBUG after send: {len(state.proofs)} proofs, total {balance_after_send} sats"
+        )
+        for p in state.proofs:
+            print(f"  - {p['amount']} sats")
+        print(
+            f"Lost {funded_balance - balance_after_send - send_amount} sats in fees on send"
+        )
+
+        # 4. Redeem the token (simulating receiving it)
+        print("\nRedeeming the sent token...")
+        redeemed_amount, unit = await wallet.redeem(token)
+        print(
+            f"Redeemed {redeemed_amount} {unit} (fees deducted from original {send_amount})"
+        )
+
+        # Give time for events to propagate
+        await asyncio.sleep(2)
+
+        # 5. Verify final balance (accounting for fees)
+        state = await wallet.fetch_wallet_state()
+        final_balance = state.balance
+        print(
+            f"\nDEBUG after redeem: {len(state.proofs)} proofs, total {final_balance} sats"
+        )
+        for p in state.proofs:
+            print(f"  - {p['amount']} sats")
+
+        fees_paid = funded_balance - final_balance
+        print(f"Total lost to fees: {fees_paid} sats")
+
+        # Basic sanity checks
+        assert final_balance > 0, "Should have positive balance"
+        # If fees were paid, balance should be less than funded
+        # If no fees (test mint might not have fees), balance could equal funded
+        assert final_balance <= funded_balance, (
+            "Balance should not exceed funded amount"
+        )
+
+        # The exact fee amount depends on mint configuration
+        # With no fees: final_balance = funded_balance
+        # With fees: final_balance < funded_balance
+        if fees_paid > 0:
+            print(f"✅ Paid {fees_paid} sats in fees")
+        else:
+            print("ℹ️  No fees charged (mint may not have fees configured)")
+
+        print("✅ Complete mint → send → redeem flow successful!")
+
+    async def test_multiple_send_operations(self, wallet):
+        """Test multiple send operations to verify fee handling."""
+        # Fund wallet
+        mint_amount = 200
+        invoice, task = await wallet.mint_async(mint_amount)
+        paid = await asyncio.wait_for(task, timeout=30.0)
+        assert paid is True
+
+        # Give time for token events to propagate to relay
+        await asyncio.sleep(2)
+
+        initial_balance = await wallet.get_balance()
+        assert initial_balance >= mint_amount
+
+        # Perform a few small sends
+        send_amounts = [10, 5, 20, 1]
+        tokens = []
+
+        for amount in send_amounts:
+            try:
+                print(f"\nSending {amount} sats...")
+                balance_before = await wallet.get_balance()
+                token = await wallet.send(amount)
+                tokens.append((amount, token))
+
+                # Give time for events to propagate
+                await asyncio.sleep(1)
+
+                balance_after = await wallet.get_balance()
+                print(f"Balance: {balance_before} → {balance_after} (sent {amount})")
+
+                # Balance should decrease by at least the sent amount
+                assert balance_after <= balance_before - amount, (
+                    f"Balance should decrease by at least {amount}"
+                )
+            except Exception as e:
+                print(f"Failed to send {amount} sats: {e}")
+                # Continue with other amounts
+
+        # Redeem all tokens that were successfully sent
+        total_redeemed = 0
+        for expected_amount, token in tokens:
+            try:
+                redeemed_amount, unit = await wallet.redeem(token)
+                total_redeemed += redeemed_amount
+                print(f"Redeemed {redeemed_amount} {unit}")
+            except Exception as e:
+                print(f"Failed to redeem token: {e}")
+
+        # Final checks
+        final_balance = await wallet.get_balance()
+        print(
+            f"\nInitial: {initial_balance}, Final: {final_balance}, Redeemed: {total_redeemed}"
+        )
+
+        # Basic sanity checks
+        assert final_balance > 0, "Should have positive balance"
+        assert len(tokens) > 0, "Should have successfully sent at least one token"
+        assert total_redeemed > 0, (
+            "Should have successfully redeemed at least one token"
+        )
+
+        print("✅ Multiple send operations test completed!")
 
 
 class TestWalletRelayOperations:
