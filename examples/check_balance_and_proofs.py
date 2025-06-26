@@ -8,7 +8,7 @@ import asyncio
 from sixty_nuts.wallet import Wallet
 
 
-async def main():
+async def main() -> None:
     """Check wallet balance with detailed breakdown."""
     async with Wallet(
         nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
