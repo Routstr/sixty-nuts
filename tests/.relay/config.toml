@@ -1,0 +1,19 @@
+[info]
+name = "sixty-nuts-relay"
+description = "Local relay used by the test-suite."
+relay_url = "ws://localhost:7000/"                  # public URL clients will see
+
+[network]
+address = "0.0.0.0"
+port = 8080
+
+[options]
+reject_future_seconds = 1800 # reject events >30 min in the future
+
+[limits]
+messages_per_sec = 0
+subscriptions_per_min = 0
+
+[database]
+engine = "sqlite"
+in_memory = false

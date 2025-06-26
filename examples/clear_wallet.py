@@ -1,136 +1,138 @@
+#!/usr/bin/env python3
+"""Example: Clear wallet by melting all tokens to Lightning.
+
+Shows how to empty your wallet by converting all tokens back to Lightning invoices.
+Useful for cashing out or cleaning up your wallet.
+"""
+
 import asyncio
-from sixty_nuts.wallet import Wallet, EventKind
+from sixty_nuts.wallet import Wallet
 
 
-async def clear_wallet():
-    """Clear all tokens from a wallet with improved rate limiting."""
+async def clear_wallet_to_lightning(wallet: Wallet, destination_invoice: str):
+    """Clear wallet by paying a Lightning invoice with all available funds."""
+    print("💸 Clearing wallet to Lightning invoice...")
+
+    # Check current balance
+    balance = await wallet.get_balance(check_proofs=True)
+    print(f"Current balance: {balance} sats")
+
+    if balance == 0:
+        print("✅ Wallet is already empty!")
+        return
+
+    try:
+        # Pay the invoice (this will use all available proofs)
+        print("⚡ Paying Lightning invoice...")
+        await wallet.melt(destination_invoice)
+
+        print("✅ Successfully paid Lightning invoice!")
+
+        # Check remaining balance
+        final_balance = await wallet.get_balance()
+        print(f"Remaining balance: {final_balance} sats")
+
+        if final_balance == 0:
+            print("🎉 Wallet successfully cleared!")
+        else:
+            print(f"💰 {final_balance} sats remain (may be dust or fees)")
+
+    except Exception as e:
+        print(f"❌ Failed to clear wallet: {e}")
+
+
+async def clear_wallet_to_address(wallet: Wallet, lightning_address: str):
+    """Clear wallet by sending all funds to a Lightning address."""
+    print(f"💸 Clearing wallet to {lightning_address}...")
+
+    # Check current balance
+    balance = await wallet.get_balance(check_proofs=True)
+    print(f"Current balance: {balance} sats")
+
+    if balance == 0:
+        print("✅ Wallet is already empty!")
+        return
+
+    # Leave some room for fees (typically 1-2 sats)
+    if balance <= 2:
+        print("❌ Balance too small to clear (need > 2 sats for fees)")
+        return
+
+    send_amount = balance - 2  # Reserve 2 sats for fees
+
+    try:
+        print(f"⚡ Sending {send_amount} sats to {lightning_address}...")
+        actual_paid = await wallet.send_to_lnurl(lightning_address, send_amount)
+
+        print(f"✅ Successfully sent {actual_paid} sats!")
+
+        # Check remaining balance
+        final_balance = await wallet.get_balance()
+        print(f"Remaining balance: {final_balance} sats")
+
+        if final_balance <= 2:
+            print("🎉 Wallet successfully cleared!")
+        else:
+            print(f"💰 {final_balance} sats remain as dust")
+
+    except Exception as e:
+        print(f"❌ Failed to clear wallet: {e}")
+
+
+async def show_wallet_state(wallet: Wallet):
+    """Show current wallet state."""
+    print("\n📊 Current Wallet State:")
+
+    balance = await wallet.get_balance(check_proofs=False)
+    print(f"   Balance: {balance} sats")
+
+    state = await wallet.fetch_wallet_state(check_proofs=False)
+    print(f"   Proofs: {len(state.proofs)}")
+
+    if state.proofs:
+        # Group by mint
+        proofs_by_mint: dict[str, int] = {}
+        for proof in state.proofs:
+            mint_url = proof.get("mint") or "unknown"
+            proofs_by_mint[mint_url] = proofs_by_mint.get(mint_url, 0) + proof["amount"]
+
+        print("   By mint:")
+        for mint_url, amount in proofs_by_mint.items():
+            print(f"     {mint_url}: {amount} sats")
+
+
+async def main():
+    """Main function."""
+    print("🧹 Wallet Clearing Example")
+    print("=" * 40)
+
     async with Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
     ) as wallet:
-        print("Clearing wallet tokens...")
+        # Show initial state
+        await show_wallet_state(wallet)
 
-        # Check current balance
         balance = await wallet.get_balance()
-        print(f"Current balance: {balance} sats")
-
         if balance == 0:
-            print("Wallet is already empty")
+            print("\n✅ Wallet is already empty - nothing to clear!")
             return
 
-        # Get relay connections and fetch events
-        relays = await wallet._get_relay_connections()
-        pubkey = wallet._get_pubkey()
+        print("\n💡 You can clear this wallet by:")
+        print(f"   1. Paying a Lightning invoice for {balance} sats")
+        print("   2. Sending to a Lightning address (leaving ~2 sats for fees)")
+        print(
+            "\n🔒 This example is read-only - uncomment code below to actually clear"
+        )
 
-        all_events = []
-        event_ids_seen = set()
-
-        print("Fetching wallet events from relays...")
-        for relay in relays:
-            try:
-                events = await relay.fetch_wallet_events(pubkey)
-                for event in events:
-                    if event["id"] not in event_ids_seen:
-                        all_events.append(event)
-                        event_ids_seen.add(event["id"])
-            except Exception as e:
-                print(f"Error fetching from relay: {e}")
-                continue
-
-        # Filter for token events
-        token_events = [e for e in all_events if e["kind"] == EventKind.Token]
-
-        if not token_events:
-            print("No token events found")
-            return
-
-        # Enhanced deletion with exponential backoff
-        print(f"Deleting {len(token_events)} token events with smart rate limiting...")
-
-        base_delay = 2.0  # Start with 2 seconds
-        max_delay = 60.0  # Maximum 60 seconds between attempts
-        current_delay = base_delay
-        successful_deletions = 0
-        failed_deletions = 0
-
-        for i, event in enumerate(token_events):
-            attempt = 0
-            max_attempts = 5
-
-            while attempt < max_attempts:
-                try:
-                    print(
-                        f"  Attempting to delete event {i + 1}/{len(token_events)} (attempt {attempt + 1})..."
-                    )
-                    await wallet.delete_token_event(event["id"])
-                    successful_deletions += 1
-
-                    # Success - reset delay to base level
-                    current_delay = base_delay
-                    print(f"  ✅ Deleted event {i + 1}/{len(token_events)}")
-                    break
-
-                except Exception as e:
-                    error_msg = str(e).lower()
-
-                    if (
-                        "rate-limit" in error_msg
-                        or "rate limit" in error_msg
-                        or "too much" in error_msg
-                    ):
-                        attempt += 1
-                        if attempt < max_attempts:
-                            # Exponential backoff for rate limiting
-                            current_delay = min(current_delay * 2, max_delay)
-                            print(
-                                f"  ⚠️  Rate limited, waiting {current_delay:.1f}s before retry {attempt + 1}/{max_attempts}"
-                            )
-                            await asyncio.sleep(current_delay)
-                        else:
-                            print(
-                                f"  ❌ Failed to delete after {max_attempts} attempts: {e}"
-                            )
-                            failed_deletions += 1
-                            # Still increase delay for next event
-                            current_delay = min(current_delay * 1.5, max_delay)
-                    else:
-                        print(f"  ❌ Non-rate-limit error: {e}")
-                        failed_deletions += 1
-                        break
-
-                # Wait between successful deletions too
-                await asyncio.sleep(current_delay)
-
-            # Progress update every 10 deletions
-            if (i + 1) % 10 == 0:
-                print(
-                    f"  📊 Progress: {successful_deletions} successful, {failed_deletions} failed, {len(token_events) - i - 1} remaining"
-                )
-
-        print("\n📈 Deletion Summary:")
-        print(f"  ✅ Successful: {successful_deletions}")
-        print(f"  ❌ Failed: {failed_deletions}")
-        print(f"  📊 Total: {len(token_events)}")
-
-        # Wait for propagation before checking final balance
-        print("\nWaiting for deletion propagation...")
-        await asyncio.sleep(5)
-
-        # Verify final state
-        try:
-            final_balance = await wallet.get_balance()
-            print(f"Final balance: {final_balance} sats")
-
-            if final_balance == 0:
-                print("🎉 Wallet successfully cleared!")
-            elif final_balance < balance:
-                print(
-                    f"✅ Partially cleared: reduced from {balance} to {final_balance} sats"
-                )
-            else:
-                print("⚠️  Balance unchanged - deletions may not have propagated yet")
-        except Exception as e:
-            print(f"Could not verify final balance: {e}")
+        # Example clearance methods (commented out for safety)
+        #
+        # To clear to Lightning address:
+        # await clear_wallet_to_address(wallet, "user@getalby.com")
+        #
+        # To clear to specific invoice:
+        # invoice = "lnbc1000n1..."  # Your invoice here
+        # await clear_wallet_to_lightning(wallet, invoice)
 
 
 if __name__ == "__main__":
-    asyncio.run(clear_wallet())
+    asyncio.run(main())

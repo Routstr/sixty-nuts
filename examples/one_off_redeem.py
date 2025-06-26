@@ -1,156 +1,117 @@
 #!/usr/bin/env python3
-"""Example: One-off token redemption to Lightning Address.
+"""Example: One-off token redemption.
 
-Shows how to use TempWallet for ephemeral operations without storing keys.
-Perfect for redeeming tokens directly to a Lightning Address.
+Shows how to redeem tokens without storing them in a persistent wallet.
+Useful for forwarding tokens directly to Lightning addresses or temporary redemption.
 """
 
 import asyncio
 import sys
-from sixty_nuts.wallet import TempWallet, redeem_to_lnurl, WalletError
+from sixty_nuts.wallet import Wallet
+from sixty_nuts.temp import redeem_to_lnurl
 
 
-async def redeem_with_temp_wallet(token: str, lightning_address: str):
-    """Redeem a token to Lightning Address using temporary wallet."""
-    print(f"Redeeming token to {lightning_address}...")
+async def redeem_and_forward(tokens: list[str], lightning_address: str):
+    """Redeem multiple tokens and forward total to Lightning address."""
+    print(f"🔄 Redeeming {len(tokens)} token(s) and forwarding to {lightning_address}")
 
-    # Create temporary wallet (generates random keys)
-    async with TempWallet() as wallet:
-        print("🔑 Created temporary wallet (keys not stored)")
+    total_sent = 0
+
+    for i, token in enumerate(tokens, 1):
+        print(f"\n📦 Processing token {i}/{len(tokens)}...")
 
         try:
-            # Redeem the token
-            amount, unit = await wallet.redeem(token)
-            print(f"✅ Redeemed {amount} {unit}")
+            # Redeem token directly to Lightning address (no wallet storage)
+            amount_sent = await redeem_to_lnurl(token, lightning_address)
+            total_sent += amount_sent
 
-            # For very small amounts, warn but still try
-            if amount <= 1:
-                print(
-                    f"\n⚠️  Warning: {amount} {unit} is very small - fees will consume it all"
-                )
-                return
+            print(f"✅ Sent {amount_sent} sats from token {i}")
 
-            # Send to Lightning Address
-            print(f"\nSending to {lightning_address}...")
-
-            try:
-                # First try sending the full amount
-                paid = await wallet.send_to_lnurl(lightning_address, amount)
-                print(f"⚡ Sent {paid} {unit} total")
-            except WalletError as e:
-                if "Insufficient balance" in str(e) and amount > 1:
-                    # Automatically retry with 1 less to account for fees
-                    print(
-                        f"💡 Adjusting for fees, sending {amount - 1} {unit} instead..."
-                    )
-                    paid = await wallet.send_to_lnurl(lightning_address, amount - 1)
-                    print(f"⚡ Sent {paid} {unit} total (after fees)")
-                else:
-                    raise
-
-            # Check final balance (should be 0 or close to 0)
-            balance = await wallet.get_balance()
-            if balance > 0:
-                print(f"\n💰 Dust remaining: {balance} {unit}")
-
-        except WalletError as e:
-            print(f"\n❌ Error: {e}")
         except Exception as e:
-            print(f"\n❌ Error: {e}")
+            print(f"❌ Failed to redeem token {i}: {e}")
+
+    if total_sent > 0:
+        print(f"\n🎉 Total forwarded: {total_sent} sats to {lightning_address}")
+    else:
+        print("\n💀 No tokens were successfully redeemed")
 
 
-async def direct_redeem_example(token: str, lightning_address: str):
-    """Use the convenience function for direct redemption."""
-    print("\nUsing direct redemption helper...")
+async def redeem_to_wallet(token: str):
+    """Redeem a single token to a temporary wallet."""
+    print("💰 Redeeming token to temporary wallet...")
 
-    try:
-        amount = await redeem_to_lnurl(token, lightning_address)
-        print(f"✅ Successfully sent {amount} sats to {lightning_address}")
-    except WalletError as e:
-        print(f"❌ Redemption failed: {e}")
-        if "too small" in str(e):
-            print("💡 Token value is too small (1 sat or less)")
-    except Exception as e:
-        print(f"❌ Redemption failed: {e}")
+    # Create temporary wallet for this redemption
+    async with Wallet(
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
+    ) as temp_wallet:
+        try:
+            # Parse token to show details
+            mint_url, unit, proofs = temp_wallet._parse_cashu_token(token)
+            total_value = sum(p["amount"] for p in proofs)
 
+            print("📋 Token Details:")
+            print(f"   Value: {total_value} {unit}")
+            print(f"   Mint: {mint_url}")
+            print(f"   Proofs: {len(proofs)}")
 
-async def batch_redeem_example(tokens: list[str], lightning_address: str):
-    """Redeem multiple tokens to same Lightning Address."""
-    print(f"\nBatch redeeming {len(tokens)} tokens...")
+            # Redeem the token
+            amount, received_unit = await temp_wallet.redeem(token)
 
-    total_redeemed = 0
-    unit = "sat"
+            print(f"✅ Successfully redeemed {amount} {received_unit}!")
 
-    # Use temporary wallet for all tokens
-    async with TempWallet() as wallet:
-        for i, token in enumerate(tokens, 1):
-            try:
-                print(f"\nToken {i}/{len(tokens)}:")
-                amount, unit = await wallet.redeem(token)
-                print(f"  ✅ Redeemed {amount} {unit}")
-                total_redeemed += amount
-            except Exception as e:
-                print(f"  ❌ Failed: {e}")
+            # Note: Wallet will be discarded when context exits
+            print("💡 Note: This was a temporary wallet - tokens are now in the ether")
 
-        if total_redeemed > 0:
-            print(f"\nTotal collected: {total_redeemed} {unit}")
+            return amount
 
-            # Check if we have enough for fees
-            if total_redeemed <= 1:
-                print(
-                    f"⚠️  {total_redeemed} {unit} is too small - fees would consume it all"
-                )
-                return
-
-            print(f"Sending to {lightning_address}...")
-
-            try:
-                # Try sending the full amount
-                paid = await wallet.send_to_lnurl(lightning_address, total_redeemed)
-                print(f"⚡ Sent {paid} {unit} total")
-            except WalletError as e:
-                if "Insufficient balance" in str(e) and total_redeemed > 1:
-                    # Automatically adjust for fees
-                    print(
-                        f"💡 Adjusting for fees, sending {total_redeemed - 1} {unit} instead..."
-                    )
-                    paid = await wallet.send_to_lnurl(
-                        lightning_address, total_redeemed - 1
-                    )
-                    print(f"⚡ Sent {paid} {unit} total (after fees)")
-                else:
-                    print(f"❌ Failed to send: {e}")
+        except Exception as e:
+            print(f"❌ Failed to redeem token: {e}")
+            return 0
 
 
 async def main():
-    """Main example."""
-    if len(sys.argv) < 3:
-        print("Usage: python one_off_redeem.py <cashu_token> <lightning_address>")
-        print("Example: python one_off_redeem.py cashuAey... user@getalby.com")
-        print("\nFor batch redemption:")
-        print(
-            "Usage: python one_off_redeem.py <lightning_address> <token1> <token2> ..."
-        )
-        print("\n💡 Note: The script automatically handles Lightning fees")
-        print("   For a 5 sat token, you'll receive ~4 sats after fees")
+    """Main function."""
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  # Redeem single token to temporary wallet")
+        print("  python one_off_redeem.py <cashu_token>")
+        print("")
+        print("  # Redeem and forward to Lightning address")
+        print("  python one_off_redeem.py <lightning_address> <token1> [token2] ...")
+        print("")
+        print("Examples:")
+        print("  python one_off_redeem.py cashuAey...")
+        print("  python one_off_redeem.py user@getalby.com cashuAey... cashuBdef...")
         return
 
-    if sys.argv[1].startswith("cashu"):
-        # Single token redemption
-        token = sys.argv[1]
-        lightning_address = sys.argv[2]
+    args = sys.argv[1:]
 
-        # Method 1: Manual temp wallet
-        await redeem_with_temp_wallet(token, lightning_address)
+    # Check if first argument is a Lightning address or token
+    if args[0].startswith("cashu"):
+        # Single token redemption to temporary wallet
+        token = args[0]
+        await redeem_to_wallet(token)
 
-        # Method 2: Direct helper (commented out to avoid double-spending)
-        # await direct_redeem_example(token, lightning_address)
+    elif "@" in args[0] or args[0].startswith("lightning:"):
+        # Forward to Lightning address
+        if len(args) < 2:
+            print("❌ Need at least one token to redeem and forward")
+            return
+
+        lightning_address = args[0]
+        tokens = args[1:]
+
+        # Validate tokens
+        invalid_tokens = [t for t in tokens if not t.startswith("cashu")]
+        if invalid_tokens:
+            print(f"❌ Invalid tokens found: {invalid_tokens[:3]}...")
+            return
+
+        await redeem_and_forward(tokens, lightning_address)
 
     else:
-        # Batch redemption (first arg is lightning address)
-        lightning_address = sys.argv[1]
-        tokens = sys.argv[2:]
-        await batch_redeem_example(tokens, lightning_address)
+        print("❌ First argument must be either a Cashu token or Lightning address")
+        print("   Lightning addresses should contain '@' or start with 'lightning:'")
 
 
 if __name__ == "__main__":

@@ -1,122 +1,82 @@
 #!/usr/bin/env python3
-"""Example: Monitor for incoming Lightning payments.
+"""Example: Monitor Lightning payments.
 
-Shows how to create an invoice and monitor for payment in the background.
-Useful for point-of-sale systems or payment processing.
+Shows how to create Lightning invoices and monitor for payments in real-time.
+Useful for merchants or services accepting Lightning payments.
 """
 
 import asyncio
-import time
 from sixty_nuts.wallet import Wallet
 
 
-async def monitor_payment(wallet: Wallet, amount: int, description: str = ""):
-    """Create invoice and monitor for payment."""
-    print(f"Creating invoice for {amount} sats...")
+async def create_and_monitor_invoice(wallet: Wallet, amount: int, timeout: int = 300):
+    """Create a Lightning invoice and monitor for payment."""
+    print(f"💡 Creating Lightning invoice for {amount} sats...")
 
-    # Create invoice with async monitoring
-    invoice, payment_task = await wallet.mint_async(amount, timeout=300)
+    # Create invoice and get monitoring task
+    invoice, payment_task = await wallet.mint_async(amount, timeout=timeout)
 
-    print("\n" + "=" * 60)
-    print(f"⚡ Lightning Invoice: {invoice}")
-    print("=" * 60)
-    print(f"\n💵 Amount: {amount} sats")
-    print("⏱️  Timeout: 5 minutes")
-    print("\nWaiting for payment...")
+    print("\n⚡ Lightning Invoice:")
+    print(invoice)
+    print(f"\n⏰ Monitoring for payment (timeout: {timeout}s)...")
+    print("💡 Pay the invoice above to complete the demonstration")
 
-    # Show progress while waiting
-    start_time = time.time()
-    dots = 0
+    # Monitor payment with progress updates
+    start_time = asyncio.get_event_loop().time()
 
     while not payment_task.done():
-        elapsed = int(time.time() - start_time)
-        minutes = elapsed // 60
-        seconds = elapsed % 60
+        await asyncio.sleep(5)  # Check every 5 seconds
+        elapsed = int(asyncio.get_event_loop().time() - start_time)
+        remaining = timeout - elapsed
 
-        # Create animated waiting indicator
-        dots = (dots + 1) % 4
-        waiting_text = "." * dots + " " * (3 - dots)
+        if remaining > 0:
+            print(f"⏳ Still waiting... ({remaining}s remaining)")
+        else:
+            break
 
-        print(
-            f"\r⏳ Waiting{waiting_text} [{minutes:02d}:{seconds:02d}]",
-            end="",
-            flush=True,
-        )
+    # Check result
+    try:
+        paid = await payment_task
 
-        await asyncio.sleep(0.5)
+        if paid:
+            print("\n✅ Payment received!")
 
-    # Check if payment was received
-    paid = await payment_task
-    print()  # New line after progress indicator
+            # Show updated balance
+            balance = await wallet.get_balance()
+            print(f"💰 New wallet balance: {balance} sats")
 
-    if paid:
-        print("\n✅ Payment received!")
+            return True
+        else:
+            print(f"\n❌ Payment timeout after {timeout} seconds")
+            return False
 
-        # Show new balance
-        balance = await wallet.get_balance()
-        print(f"💰 New balance: {balance} sats")
-
-        return True
-    else:
-        print("\n❌ Payment timed out!")
+    except Exception as e:
+        print(f"\n❌ Error monitoring payment: {e}")
         return False
 
 
-async def process_multiple_payments(wallet: Wallet):
-    """Example of processing multiple payments concurrently."""
-    print("\nExample: Processing multiple payments concurrently\n")
-
-    # Create multiple invoices
-    payments = [
-        ("Coffee", 5000),
-        ("Sandwich", 8000),
-        ("Dessert", 3000),
-    ]
-
-    tasks = []
-
-    for item, amount in payments:
-        print(f"Creating invoice for {item} ({amount} sats)...")
-        invoice, task = await wallet.mint_async(amount, timeout=600)
-        tasks.append((item, amount, invoice, task))
-        print(f"  Invoice: {invoice[:50]}...")
-
-    print("\nMonitoring all payments (10 minute timeout)...")
-
-    # Wait for any payment to complete
-    while tasks:
-        # Check which payments are done
-        for item, amount, invoice, task in tasks[:]:
-            if task.done():
-                paid = await task
-                if paid:
-                    print(f"\n✅ {item} paid! ({amount} sats)")
-                else:
-                    print(f"\n❌ {item} payment expired")
-                tasks.remove((item, amount, invoice, task))
-
-        if tasks:
-            # Show status
-            print(f"\r⏳ Waiting for {len(tasks)} payment(s)...", end="", flush=True)
-            await asyncio.sleep(1)
-
-    print("\n\nAll payments processed!")
-    balance = await wallet.get_balance()
-    print(f"💰 Final balance: {balance} sats")
-
-
 async def main():
-    """Main example."""
-    # Initialize wallet
-    async with Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
-    ) as wallet:
-        # Example 1: Monitor single payment
-        print("Example 1: Single payment monitoring")
-        await monitor_payment(wallet, 21, "Test payment")
+    """Main function."""
+    print("📱 Lightning Payment Monitor")
+    print("=" * 40)
 
-        # Example 2: Multiple concurrent payments (commented out for demo)
-        # await process_multiple_payments(wallet)
+    async with Wallet(
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
+    ) as wallet:
+        # Show current balance
+        balance = await wallet.get_balance()
+        print(f"Current balance: {balance} sats")
+
+        # Create and monitor a small invoice
+        amount = 100  # 100 sats
+        timeout = 120  # 2 minutes
+
+        success = await create_and_monitor_invoice(wallet, amount, timeout)
+
+        if success:
+            print("\n🎉 Payment monitoring completed successfully!")
+        else:
+            print("\n💀 Payment monitoring failed or timed out")
 
 
 if __name__ == "__main__":

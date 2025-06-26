@@ -1,7 +1,7 @@
 """Tests for LNURL functionality."""
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from sixty_nuts.lnurl import decode_lnurl, get_lnurl_data, get_lnurl_invoice, LNURLError
 
@@ -60,7 +60,7 @@ class TestGetLNURLData:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj
@@ -83,7 +83,7 @@ class TestGetLNURLData:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj
@@ -102,7 +102,7 @@ class TestGetLNURLData:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj
@@ -126,7 +126,7 @@ class TestGetLNURLInvoice:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj
@@ -158,7 +158,7 @@ class TestGetLNURLInvoice:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj
@@ -177,7 +177,7 @@ class TestGetLNURLInvoice:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response_obj = AsyncMock()
             mock_response_obj.json = lambda: mock_response
-            mock_response_obj.raise_for_status = AsyncMock()
+            mock_response_obj.raise_for_status = Mock()
 
             mock_client.return_value.__aenter__.return_value.get = AsyncMock(
                 return_value=mock_response_obj

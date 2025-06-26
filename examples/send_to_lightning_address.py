@@ -7,7 +7,8 @@ This automatically handles the LNURL flow and Lightning payment.
 
 import asyncio
 import sys
-from sixty_nuts.wallet import Wallet, WalletError
+from sixty_nuts.types import WalletError
+from sixty_nuts.wallet import Wallet
 
 
 async def send_to_address(wallet: Wallet, address: str, amount: int):
