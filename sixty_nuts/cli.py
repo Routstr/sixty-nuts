@@ -41,9 +41,178 @@ app = typer.Typer(
 )
 console = Console()
 
-# Environment variable for NSEC
-NSEC_ENV_VAR = "SIXTY_NUTS_NSEC"
-NSEC_FILE = Path.home() / ".sixty_nuts_nsec"
+# Environment variable for NSEC is "NSEC"
+
+
+def get_nsec_from_env() -> str | None:
+    """Get NSEC from environment variable or .env file.
+
+    Expected format: hex private key or nsec1... format
+    Example: NSEC="nsec1..." or NSEC="hex_private_key"
+
+    Priority order:
+    1. Environment variable NSEC
+    2. .env file in current working directory
+
+    Returns:
+        NSEC from environment or .env file, None if not set
+    """
+    # First check environment variable
+    env_nsec = os.getenv("NSEC")
+    if env_nsec:
+        return env_nsec.strip()
+
+    # Then check .env file in current working directory
+    try:
+        from pathlib import Path
+
+        env_file = Path.cwd() / ".env"
+        if env_file.exists():
+            content = env_file.read_text()
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("NSEC="):
+                    # Extract value after the equals sign
+                    value = line.split("=", 1)[1]
+                    # Remove quotes if present
+                    value = value.strip("\"'")
+                    if value:
+                        return value
+    except Exception:
+        # If reading .env file fails, continue
+        pass
+
+    return None
+
+
+def set_nsec_in_env(nsec: str) -> None:
+    """Set NSEC in .env file for persistent caching.
+
+    Args:
+        nsec: NSEC to cache
+    """
+    if not nsec:
+        return
+
+    from pathlib import Path
+
+    env_file = Path.cwd() / ".env"
+    env_line = f'NSEC="{nsec}"\n'
+
+    try:
+        if env_file.exists():
+            # Check if NSEC already exists in the file
+            content = env_file.read_text()
+            lines = content.splitlines()
+
+            # Look for existing NSEC line
+            nsec_line_found = False
+            new_lines = []
+            for line in lines:
+                if line.strip().startswith("NSEC="):
+                    # Replace existing NSEC line
+                    new_lines.append(env_line.rstrip())
+                    nsec_line_found = True
+                else:
+                    new_lines.append(line)
+
+            if not nsec_line_found:
+                # Add new NSEC line at the end
+                new_lines.append(env_line.rstrip())
+
+            # Write back to file
+            env_file.write_text("\n".join(new_lines) + "\n")
+        else:
+            # Create new .env file
+            env_file.write_text(env_line)
+
+        # Set secure permissions (read only for user)
+        env_file.chmod(0o600)
+
+    except Exception as e:
+        # If writing to .env file fails, fall back to environment variable
+        print(f"Warning: Could not write to .env file: {e}")
+        print("Falling back to session environment variable")
+        os.environ["NSEC"] = nsec
+
+
+def clear_nsec_from_env() -> bool:
+    """Clear NSEC from .env file and environment variable.
+
+    Returns:
+        True if NSEC was cleared, False if none was set
+    """
+    cleared = False
+
+    # Clear from environment variable
+    if "NSEC" in os.environ:
+        del os.environ["NSEC"]
+        cleared = True
+
+    # Clear from .env file
+    try:
+        from pathlib import Path
+
+        env_file = Path.cwd() / ".env"
+        if env_file.exists():
+            content = env_file.read_text()
+            lines = content.splitlines()
+
+            # Remove NSEC line
+            new_lines = []
+            for line in lines:
+                if not line.strip().startswith("NSEC="):
+                    new_lines.append(line)
+                else:
+                    cleared = True
+
+            if new_lines:
+                # Write back remaining lines
+                env_file.write_text("\n".join(new_lines) + "\n")
+            else:
+                # If file would be empty, remove it
+                env_file.unlink()
+
+    except Exception:
+        # If clearing from .env file fails, that's okay
+        pass
+
+    return cleared
+
+
+def get_nsec() -> str:
+    """Get NSEC from environment, .env file, or prompt user."""
+    # Try .env approach first
+    nsec = get_nsec_from_env()
+    if nsec:
+        return nsec
+
+    # Prompt user
+    console.print("\n[yellow]NSEC (Nostr private key) not found.[/yellow]")
+    console.print("You need a Nostr private key to use this wallet.")
+    console.print("Format: nsec1... or hex private key")
+
+    nsec = Prompt.ask("Enter your NSEC")
+
+    if not nsec:
+        console.print("[red]NSEC is required![/red]")
+        raise typer.Exit(1)
+
+    # Ask if user wants to store it
+    store_choice = Prompt.ask(
+        "Store NSEC for future use?", choices=["env", "file", "no"], default="env"
+    )
+
+    if store_choice == "env":
+        set_nsec_in_env(nsec)
+        console.print("[green]✅ NSEC stored in .env file[/green]")
+    elif store_choice == "file":
+        console.print("\n[green]Add this to your shell profile:[/green]")
+        console.print(f"export NSEC={nsec}")
+        console.print("\nOr run:")
+        console.print(f"echo 'export NSEC={nsec}' >> ~/.bashrc")
+
+    return nsec
 
 
 async def prompt_user_for_mints() -> list[str]:
@@ -85,7 +254,7 @@ async def prompt_user_for_mints() -> list[str]:
             # Continue to selection below
         # If "select-new", continue to manual selection
 
-    console.print(f"\n[yellow]📋 Popular Cashu Mints:[/yellow]")
+    console.print("\n[yellow]📋 Popular Cashu Mints:[/yellow]")
 
     # Create table for popular mints
     table = Table(show_header=True, header_style="bold cyan")
@@ -128,7 +297,7 @@ async def prompt_user_for_mints() -> list[str]:
         elif choice.lower() == "env":
             if selected_mints:
                 mint_str = ",".join(selected_mints)
-                console.print(f"\n[green]Add this to your shell profile:[/green]")
+                console.print("\n[green]Add this to your shell profile:[/green]")
                 console.print(f"export {MINTS_ENV_VAR}={mint_str}")
                 console.print("\nOr run:")
                 console.print(f"echo 'export {MINTS_ENV_VAR}={mint_str}' >> ~/.bashrc")
@@ -243,48 +412,6 @@ async def create_wallet_with_mint_selection(
         else:
             # Re-raise other wallet errors
             raise
-
-
-def get_nsec() -> str:
-    """Get NSEC from environment, file, or prompt user."""
-    # Try environment variable first
-    nsec = os.getenv(NSEC_ENV_VAR)
-    if nsec:
-        return nsec
-
-    # Try local file
-    if NSEC_FILE.exists():
-        nsec = NSEC_FILE.read_text().strip()
-        if nsec:
-            return nsec
-
-    # Prompt user
-    console.print("\n[yellow]NSEC (Nostr private key) not found.[/yellow]")
-    console.print("You need a Nostr private key to use this wallet.")
-    console.print("Format: nsec1... or hex private key")
-
-    nsec = Prompt.ask("Enter your NSEC")
-
-    if not nsec:
-        console.print("[red]NSEC is required![/red]")
-        raise typer.Exit(1)
-
-    # Ask if user wants to store it
-    store_choice = Prompt.ask(
-        "Store NSEC for future use?", choices=["env", "file", "no"], default="no"
-    )
-
-    if store_choice == "env":
-        console.print("\n[green]Add this to your shell profile:[/green]")
-        console.print(f"export {NSEC_ENV_VAR}={nsec}")
-        console.print("\nOr run:")
-        console.print(f"echo 'export {NSEC_ENV_VAR}={nsec}' >> ~/.bashrc")
-    elif store_choice == "file":
-        NSEC_FILE.write_text(nsec)
-        NSEC_FILE.chmod(0o600)  # Read only for user
-        console.print(f"[green]NSEC stored in {NSEC_FILE}[/green]")
-
-    return nsec
 
 
 def get_terminal_size() -> tuple[int, int]:
@@ -1155,8 +1282,8 @@ def main(
 
     📝 NSEC CONFIGURATION:
     Your Nostr private key can be set via:
-    • Environment variable: SIXTY_NUTS_NSEC="nsec1..."
-    • Stored in ~/.sixty_nuts_nsec file
+    • Environment variable: NSEC="nsec1..."
+    • Stored in cwd/.env file: NSEC="nsec1..."
     • Interactive prompt (secure input)
     """
     pass
@@ -1194,7 +1321,6 @@ def relays(
     async def _relays():
         from .relay import (
             get_relays_from_env,
-            prompt_user_for_relays,
             discover_relays_from_nip65,
             validate_relay_url,
             clear_relays_from_env,
@@ -1206,7 +1332,7 @@ def relays(
             cleared = clear_relays_from_env()
             if cleared:
                 console.print(
-                    f"[green]🗑️ Cleared relay cache from environment and .env file[/green]"
+                    "[green]🗑️ Cleared relay cache from environment and .env file[/green]"
                 )
                 console.print("[dim]Next relay operation will do fresh discovery[/dim]")
             else:
@@ -1233,11 +1359,9 @@ def relays(
                 for i, relay in enumerate(env_relays, 1):
                     status = "✅ Valid" if validate_relay_url(relay) else "❌ Invalid"
                     console.print(f"  {i}. {relay} - {status}")
+                console.print("[dim]💡 Using fast path - no Nostr queries needed[/dim]")
                 console.print(
-                    f"[dim]💡 Using fast path - no Nostr queries needed[/dim]"
-                )
-                console.print(
-                    f"[dim]Run 'nuts relays --clear-cache' to force fresh discovery[/dim]"
+                    "[dim]Run 'nuts relays --clear-cache' to force fresh discovery[/dim]"
                 )
             else:
                 console.print(
@@ -1247,7 +1371,7 @@ def relays(
                     f'   Set with: export {RELAYS_ENV_VAR}="wss://relay1.com,wss://relay2.com"'
                 )
                 console.print(
-                    f"[dim]💡 Will auto-cache discovered relays in .env file[/dim]"
+                    "[dim]💡 Will auto-cache discovered relays in .env file[/dim]"
                 )
 
         if discover:
@@ -1282,7 +1406,7 @@ def relays(
                     from .relay import set_relays_in_env
 
                     set_relays_in_env(discovered)
-                    console.print(f"[blue]💾 Cached relays in .env file[/blue]")
+                    console.print("[blue]💾 Cached relays in .env file[/blue]")
                 else:
                     console.print(
                         "[yellow]⚠️ No relays found in your Nostr profile[/yellow]"
@@ -1326,7 +1450,7 @@ def relays(
                 try:
                     relay = NostrRelay(relay_url)
                     await relay.connect()
-                    console.print(f"     [green]✅ Connected successfully[/green]")
+                    console.print("     [green]✅ Connected successfully[/green]")
                     await relay.disconnect()
                 except Exception as e:
                     console.print(f"     [red]❌ Failed: {e}[/red]")
@@ -1565,26 +1689,28 @@ def erase(
             # Handle NSEC clearing first (doesn't require wallet connection)
             nsec_existed = False
             if clean_nsec:
-                if NSEC_FILE.exists():
+                # Check .env file
+                env_nsec = get_nsec_from_env()
+                if env_nsec:
                     nsec_existed = True
                     if not confirm:
                         console.print(
                             "\n[yellow]⚠️  Will delete local NSEC storage:[/yellow]"
                         )
-                        console.print(f"   🗂️  NSEC file: {NSEC_FILE}")
-                        if os.getenv(NSEC_ENV_VAR):
+                        console.print("   🗂️  NSEC from .env file")
+                        if os.getenv("NSEC"):
                             console.print(
-                                f"   [dim]Note: Environment variable {NSEC_ENV_VAR} will remain set[/dim]"
+                                "   [dim]Note: Environment variable NSEC will remain set[/dim]"
                             )
 
                 elif not any([clean_wallet, clean_history, clean_tokens]):
                     # Only NSEC requested but no file exists
                     console.print("[yellow]ℹ️ No stored NSEC file found[/yellow]")
-                    if os.getenv(NSEC_ENV_VAR):
+                    if os.getenv("NSEC"):
                         console.print(
-                            f"[yellow]Environment variable {NSEC_ENV_VAR} is still set[/yellow]"
+                            "[yellow]Environment variable NSEC is still set[/yellow]"
                         )
-                        console.print("Unset it with: unset SIXTY_NUTS_NSEC")
+                        console.print("Unset it with: unset NSEC")
                     return
 
             # Skip wallet operations if only NSEC cleaning and no other operations
@@ -1599,15 +1725,16 @@ def erase(
                         console.print("[yellow]❌ NSEC deletion cancelled[/yellow]")
                         return
 
-                # Clear NSEC file
+                # Clear NSEC from .env file
                 if nsec_existed:
-                    NSEC_FILE.unlink()
-                    console.print(f"[green]🗑️ Cleared NSEC from {NSEC_FILE}[/green]")
-                    if os.getenv(NSEC_ENV_VAR):
+                    cleared_env = clear_nsec_from_env()
+                    if cleared_env:
+                        console.print("[green]🗑️ Cleared NSEC from .env file[/green]")
+                    if os.getenv("NSEC"):
                         console.print(
-                            f"[yellow]Environment variable {NSEC_ENV_VAR} is still set[/yellow]"
+                            "[yellow]Environment variable NSEC is still set[/yellow]"
                         )
-                        console.print("Unset it with: unset SIXTY_NUTS_NSEC")
+                        console.print("Unset it with: unset NSEC")
                 return
 
             # Get NSEC for wallet operations (this will prompt if needed and file was just deleted)
@@ -1747,13 +1874,14 @@ def erase(
 
                 if clean_nsec and nsec_existed:
                     console.print("🗑️ Deleting local NSEC storage...")
-                    NSEC_FILE.unlink()
-                    console.print(f"   ✅ Cleared NSEC from {NSEC_FILE}")
-                    if os.getenv(NSEC_ENV_VAR):
+                    # Clear from .env file and environment
+                    cleared_env = clear_nsec_from_env()
+                    if cleared_env:
                         console.print(
-                            f"   [yellow]Environment variable {NSEC_ENV_VAR} is still set[/yellow]"
+                            "   ✅ Cleared NSEC from .env file and environment"
                         )
-                        console.print("   Unset it with: unset SIXTY_NUTS_NSEC")
+                    else:
+                        console.print("   ℹ️ No NSEC found to clear")
 
                 # Summary
                 console.print(
