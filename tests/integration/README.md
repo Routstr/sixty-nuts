@@ -234,3 +234,106 @@ docker stats
 - Tests require network access for Docker image pulls
 - Some tests are skipped by default (require manual intervention like paying invoices)
 - The test runner automatically handles container lifecycle
+
+## Setup
+
+Set the environment variable to enable integration tests:
+
+```bash
+export RUN_INTEGRATION_TESTS=1
+```
+
+## Test Files
+
+### test_wallet_complete_flow.py
+
+Tests the complete wallet functionality against real mint and relay infrastructure.
+
+### test_lnurl_requests.py  
+
+Tests LNURL functionality against real services.
+
+### test_mint_methods.py
+
+Tests mint API methods against real mint services.
+
+### test_relay_lookup.py
+
+**NEW**: Comprehensive relay integration tests that test both `relay.py` and `events.py` functionality using public Nostr relays.
+
+#### What it tests
+
+**Basic Relay Operations:**
+
+- Connection establishment and reconnection
+- Event fetching with filters and timeouts
+- Timeout handling and error recovery
+
+**Event Publishing & Retrieval:**
+
+- Publishing text notes and fetching them back
+- Publishing NIP-60 wallet metadata events (kind 17375)
+- Publishing delete events (NIP-09)
+- End-to-end publish/fetch verification
+
+**Queued Relay Operations:**
+
+- Event queuing system with priorities
+- Batch processing and callbacks
+- Queue processor lifecycle management
+- Pending proofs tracking for token events
+
+**Relay Pool & Manager:**
+
+- Multi-relay pool creation and management
+- Relay discovery from kind:10019 events
+- Publishing through relay managers
+- Connection management and cleanup
+
+**Event Manager Operations:**
+
+- Wallet event creation and verification
+- Token event publishing with NIP-60 format conversion
+- Spending history events (kind 7376)
+- Proof format conversion (hex ↔ base64)
+- Event counting operations
+
+**Error Handling:**
+
+- Connection timeout handling
+- Invalid event rejection
+- Graceful failure modes
+
+#### Public Relays Used
+
+- `wss://relay.damus.io` - Primary test relay
+- `wss://relay.primal.net` - Secondary relay  
+- `wss://relay.nostr.band` - Tertiary relay
+
+#### Key Features
+
+- Uses fresh generated nsec keys for each test run
+- Tests against real public relays (no mocking)
+- Handles rate limiting gracefully
+- Comprehensive coverage of both relay.py and events.py
+- Tests both successful operations and error conditions
+
+#### Running
+
+```bash
+# Run all relay integration tests
+RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_relay_lookup.py -v
+
+# Run specific test categories
+RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_relay_lookup.py::TestBasicRelayOperations -v
+RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_relay_lookup.py::TestEventPublishing -v
+
+# Run the basic standalone test
+RUN_INTEGRATION_TESTS=1 python tests/integration/test_relay_lookup.py
+```
+
+The tests are designed to be robust against public relay quirks including rate limiting, temporary unavailability, and varying relay policies.
+
+### test_wallet_complete_flow.py
+
+Tests complete wallet operations that require both mint and relay services.
