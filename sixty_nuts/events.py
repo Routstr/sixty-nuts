@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Literal, cast
+import base64
 
 from coincurve import PrivateKey
 
@@ -34,6 +35,58 @@ class EventManager:
         self.relay_manager = relay_manager
         self._privkey = privkey
         self.mint_urls = mint_urls
+
+    # ───────────────────────── NIP-60 Conversion Helpers ─────────────────────────
+
+    def _convert_proof_to_nip60(self, proof: ProofDict) -> ProofDict:
+        """Convert a proof from internal format (hex secret) to NIP-60 format (base64 secret).
+
+        Args:
+            proof: Proof with hex secret
+
+        Returns:
+            Proof with base64 secret for NIP-60 storage
+        """
+        # Create a copy to avoid modifying the original
+        nip60_proof = proof.copy()
+
+        # Convert hex secret to base64
+        secret = proof["secret"]
+        try:
+            # Assume it's hex and convert to base64
+            secret_bytes = bytes.fromhex(secret)
+            nip60_proof["secret"] = base64.b64encode(secret_bytes).decode("ascii")
+        except (ValueError, TypeError):
+            # If it fails, it might already be base64 or some other format
+            # Leave it as is
+            pass
+
+        return nip60_proof
+
+    def _convert_proof_from_nip60(self, proof: ProofDict) -> ProofDict:
+        """Convert a proof from NIP-60 format (base64 secret) to internal format (hex secret).
+
+        Args:
+            proof: Proof with base64 secret from NIP-60
+
+        Returns:
+            Proof with hex secret for internal use
+        """
+        # Create a copy to avoid modifying the original
+        internal_proof = proof.copy()
+
+        # Convert base64 secret to hex
+        secret = proof["secret"]
+        try:
+            # Try to decode from base64
+            secret_bytes = base64.b64decode(secret)
+            internal_proof["secret"] = secret_bytes.hex()
+        except (ValueError, TypeError):
+            # If it fails, it might already be hex
+            # Leave it as is
+            pass
+
+        return internal_proof
 
     # ───────────────────────── Wallet Event Management ─────────────────────────
 
@@ -372,7 +425,10 @@ class EventManager:
         mint_url: str,
         deleted_token_ids: list[str] | None = None,
     ) -> list[str]:
-        """Split large token events into smaller chunks to avoid relay size limits."""
+        """Split large token events into smaller chunks to avoid relay size limits.
+
+        Note: proofs should already be in NIP-60 format (base64 secrets).
+        """
         if not proofs:
             return []
 
@@ -480,9 +536,12 @@ class EventManager:
         SAFETY: This method now publishes new events BEFORE deleting old ones
         to prevent proof loss if relay publishing fails.
         """
+        # Convert proofs to NIP-60 format (base64 secrets)
+        nip60_proofs = [self._convert_proof_to_nip60(p) for p in proofs]
+
         # Get mint URL from proofs or use default
-        if proofs and proofs[0].get("mint"):
-            mint_url = proofs[0]["mint"]
+        if nip60_proofs and nip60_proofs[0].get("mint"):
+            mint_url = nip60_proofs[0]["mint"]
         else:
             mint_url = self.mint_urls[0] if self.mint_urls else None
 
@@ -493,7 +552,7 @@ class EventManager:
         # Create a test event to estimate size
         content_data = {
             "mint": mint_url,
-            "proofs": proofs,
+            "proofs": nip60_proofs,
         }
 
         if deleted_token_ids:
@@ -511,7 +570,7 @@ class EventManager:
         # If event is too large, split it
         if self.relay_manager.estimate_event_size(test_event) > 60000:
             event_ids = await self._split_large_token_events(
-                proofs, mint_url, deleted_token_ids
+                nip60_proofs, mint_url, deleted_token_ids
             )
             return event_ids[0] if event_ids else ""
 
