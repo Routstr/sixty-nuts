@@ -63,12 +63,14 @@ class TestWalletFeeCalculation:
         # Test with 0.5 sat per proof fee (500 ppk)
         keyset_info = {"input_fee_ppk": 500}
         fees = wallet.calculate_input_fees(mock_proofs, keyset_info)
-        assert fees == 0  # Should round down to 0
+        assert (
+            fees == 1
+        )  # Should round up to 1 (ceiling division to match mint behavior)
 
         # Test with 1.5 sat per proof fee (1500 ppk)
         keyset_info = {"input_fee_ppk": 1500}
         fees = wallet.calculate_input_fees(mock_proofs, keyset_info)
-        assert fees == 1  # Should round down to 1
+        assert fees == 2  # Should round up to 2
 
     def test_estimate_transaction_fees(self):
         """Test transaction fee estimation."""
