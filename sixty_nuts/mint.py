@@ -543,15 +543,24 @@ class Mint:
                     "Amount not available in quote status and not provided"
                 )
 
-            # Get active keyset
-            keys_resp = await self.get_keys()
-            keysets = keys_resp.get("keysets", [])
-            keyset_id = keysets[0]["id"] if keysets else ""
+            # Get the quote's unit
+            quote_unit = quote_status.get("unit")
 
-            # Simple denomination split using mint's active keyset id
-            keys_resp_active = await self.get_keys()
-            keysets_active = keys_resp_active.get("keysets", [])
-            keyset_id_active = keysets_active[0]["id"] if keysets_active else keyset_id
+            # Get active keyset for the quote's unit
+            keysets_resp = await self.get_keysets()
+            keysets = keysets_resp.get("keysets", [])
+
+            # Filter for active keysets with the quote's unit
+            matching_keysets = [
+                ks
+                for ks in keysets
+                if ks.get("active", True) and ks.get("unit") == quote_unit
+            ]
+
+            if not matching_keysets:
+                raise MintError(f"No active keysets found for unit '{quote_unit}'")
+
+            keyset_id_active = matching_keysets[0]["id"]
 
             # Create blinded messages for the amount
             outputs, secrets, blinding_factors = create_blinded_messages_for_amount(
@@ -562,7 +571,7 @@ class Mint:
             mint_resp = await self.mint(quote=quote_id, outputs=outputs)
 
             # Get mint public key for unblinding
-            keys_resp = await self.get_keys()
+            keys_resp = await self.get_keys(keyset_id_active)
             mint_keys = None
             for ks in keys_resp.get("keysets", []):
                 if ks["id"] == keyset_id_active:
