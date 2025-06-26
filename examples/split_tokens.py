@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Example: Split tokens into specific denominations.
+"""Example: Split tokens into specific amounts.
 
-Shows how to split your balance into specific token denominations.
-Useful for privacy and preparing tokens for specific payment amounts.
+Shows how to split your tokens into specific denominations or prepare exact amounts.
+Useful for making specific payments or optimizing token denominations.
 """
 
 import asyncio
@@ -10,80 +10,79 @@ import sys
 from sixty_nuts.wallet import Wallet
 
 
-async def split_tokens(wallet: Wallet, denominations: list[int]):
-    """Split wallet balance into specific denominations."""
-    # Check current balance
-    balance = await wallet.get_balance()
-    total_requested = sum(denominations)
+async def split_tokens(wallet: Wallet, target_amounts: list[int]):
+    """Split tokens to create specific amounts."""
+    total_needed = sum(target_amounts)
 
-    print(f"Current balance: {balance} sats")
-    print(f"Requested split: {denominations} (total: {total_requested} sats)")
+    print(f"🔪 Splitting tokens to create {len(target_amounts)} specific amounts")
+    print(f"Target amounts: {target_amounts}")
+    print(f"Total needed: {total_needed} sats")
 
-    if total_requested > balance:
-        print(f"❌ Insufficient balance! Need {total_requested}, have {balance}")
-        return None
+    # Check if we have enough balance
+    balance = await wallet.get_balance(check_proofs=True)
+    if balance < total_needed:
+        print(f"❌ Insufficient balance! Need {total_needed}, have {balance}")
+        return
 
-    # First, create a token with the exact amount we want to split
-    print(f"\nCreating token for {total_requested} sats...")
-    token = await wallet.send(total_requested)
+    print(f"✅ Sufficient balance: {balance} sats")
 
-    # Now redeem it back, which will give us optimal denominations
-    print("Redeeming with split...")
-    amount, unit = await wallet.redeem(token)
-
-    print(f"✅ Successfully split {amount} {unit} into optimal denominations")
-
-    # Show the resulting denomination breakdown
+    # Get current wallet state
     state = await wallet.fetch_wallet_state(check_proofs=False)
-    denominations_count: dict[int, int] = {}
 
-    for proof in state.proofs:
-        amount = proof["amount"]
-        denominations_count[amount] = denominations_count.get(amount, 0) + 1
+    # For each target amount, try to create exact tokens
+    created_tokens = []
 
-    print("\nResulting denominations:")
-    for denom in sorted(denominations_count.keys(), reverse=True):
-        count = denominations_count[denom]
-        print(f"  {denom} sat: {count} token(s)")
+    for amount in target_amounts:
+        print(f"\n📦 Creating token for {amount} sats...")
 
-    return token
+        try:
+            # Create token for this exact amount
+            token = await wallet.send(amount)
+            created_tokens.append((amount, token))
+            print(f"✅ Created token: {token[:50]}...")
 
+        except Exception as e:
+            print(f"❌ Failed to create {amount} sat token: {e}")
 
-async def prepare_exact_amount(wallet: Wallet, amount: int):
-    """Prepare a token with exact amount for payment."""
-    print(f"\nPreparing exact {amount} sat token...")
+    # Show results
+    if created_tokens:
+        print(f"\n🎉 Successfully created {len(created_tokens)} tokens:")
+        for amount, token in created_tokens:
+            print(f"   💰 {amount} sats: {token[:30]}...")
 
-    try:
-        token = await wallet.send(amount)
-        print(f"✅ Token ready: {token}")
-        return token
-    except Exception as e:
-        print(f"❌ Failed to prepare token: {e}")
-        return None
+        # Show remaining balance
+        final_balance = await wallet.get_balance()
+        print(f"\n💳 Remaining balance: {final_balance} sats")
+    else:
+        print("\n💀 No tokens were created")
 
 
 async def main():
-    """Main example."""
+    """Main function."""
     if len(sys.argv) < 2:
-        print("Usage: python split_tokens.py <amount> [amount2] [amount3] ...")
-        print("Example: python split_tokens.py 100 50 25 10 5")
-        print("\nOr to prepare exact amount:")
-        print("Usage: python split_tokens.py <amount>")
-        print("Example: python split_tokens.py 137")
+        print("Usage: python split_tokens.py <amount1> [amount2] [amount3] ...")
+        print("\nExamples:")
+        print("  python split_tokens.py 100        # Create one 100 sat token")
+        print("  python split_tokens.py 50 25 10   # Create three tokens")
+        print("  python split_tokens.py 1000 500   # Create two larger tokens")
         return
 
-    amounts = [int(arg) for arg in sys.argv[1:]]
+    # Parse amounts from command line
+    try:
+        amounts = [int(arg) for arg in sys.argv[1:]]
+    except ValueError:
+        print("❌ All arguments must be valid numbers")
+        return
+
+    if any(amount <= 0 for amount in amounts):
+        print("❌ All amounts must be positive")
+        return
 
     # Initialize wallet
     async with Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
     ) as wallet:
-        if len(amounts) == 1:
-            # Prepare exact amount
-            await prepare_exact_amount(wallet, amounts[0])
-        else:
-            # Split into multiple denominations
-            await split_tokens(wallet, amounts)
+        await split_tokens(wallet, amounts)
 
 
 if __name__ == "__main__":

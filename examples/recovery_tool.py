@@ -1,178 +1,117 @@
 #!/usr/bin/env python3
-"""Recovery tool for missing proofs due to wallet bugs."""
+"""Example: Wallet recovery demonstration.
+
+Shows how to recover wallet state from Nostr relays using just your private key.
+This demonstrates the power of NIP-60 for wallet backup and recovery.
+"""
 
 import asyncio
-import json
 from sixty_nuts.wallet import Wallet
 
 
-async def check_missing_proofs():
-    """Check for missing proofs and potential recovery options."""
-    nsec = input("Enter your NSEC: ").strip()
+async def demonstrate_recovery(nsec: str):
+    """Demonstrate wallet recovery from Nostr relays."""
+    print("🔄 Wallet Recovery Demonstration")
+    print("=" * 40)
 
-    print("🔍 Scanning for missing proofs...")
-    print("=" * 60)
+    print("Creating wallet from private key...")
+    print("This will automatically recover state from Nostr relays...")
 
     async with Wallet(nsec=nsec) as wallet:
-        # 1. Get current state
-        print("\n📊 Current Wallet State:")
-        validated_state = await wallet.fetch_wallet_state(check_proofs=True)
-        unvalidated_state = await wallet.fetch_wallet_state(check_proofs=False)
+        print("✅ Wallet created and connected to relays")
 
-        print(f"  Validated balance: {validated_state.balance} sats")
-        print(f"  Unvalidated balance: {unvalidated_state.balance} sats")
-        print(
-            f"  Difference: {unvalidated_state.balance - validated_state.balance} sats"
-        )
+        # Check if wallet events exist
+        exists, wallet_event = await wallet.check_wallet_event_exists()
 
-        if unvalidated_state.balance > validated_state.balance:
-            print(
-                f"  ⚠️  You have {unvalidated_state.balance - validated_state.balance} sats in potentially spent proofs"
-            )
+        if exists and wallet_event:
+            from datetime import datetime
 
-        # 2. Check relay queue for pending proofs
-        print("\n📤 Checking Relay Queue:")
-        if wallet.relay_manager.use_queued_relays and wallet.relay_manager.relay_pool:
-            pending_proofs = wallet.relay_manager.relay_pool.get_pending_proofs()
-            if pending_proofs:
-                pending_total = sum(p.get("amount", 0) for p in pending_proofs)
-                print(
-                    f"  Found {len(pending_proofs)} pending proofs worth {pending_total} sats"
-                )
-                print(
-                    "  💡 These proofs are queued for publishing - they may appear soon!"
-                )
-
-                # Show breakdown
-                for i, proof in enumerate(pending_proofs[:5]):  # Show first 5
-                    print(f"    Proof {i + 1}: {proof.get('amount', 0)} sats")
-                if len(pending_proofs) > 5:
-                    print(f"    ... and {len(pending_proofs) - 5} more")
-            else:
-                print("  No pending proofs found in relay queue")
+            created_time = datetime.fromtimestamp(wallet_event["created_at"])
+            print(f"📅 Found wallet event created: {created_time}")
+            print(f"🆔 Event ID: {wallet_event['id'][:16]}...")
         else:
-            print("  Not using queued relays")
+            print("⚠️  No wallet configuration found on relays")
 
-        # 3. Fetch raw events from all relays to check for inconsistencies
-        print("\n📡 Checking All Relays for Events:")
-        relays = await wallet.relay_manager.get_relay_connections()
-        all_token_events = []
+        # Show recovered configuration
+        print(f"\n🏦 Recovered Configuration:")
+        print(f"   Mints: {len(wallet.mint_urls)}")
+        for i, mint_url in enumerate(wallet.mint_urls, 1):
+            print(f"   {i}. {mint_url}")
 
-        for i, relay in enumerate(relays):
-            try:
-                print(f"  Checking relay {i + 1}: {relay.url}")
+        print(f"   Relays: {len(wallet.relays)}")
+        for i, relay_url in enumerate(wallet.relays, 1):
+            print(f"   {i}. {relay_url}")
 
-                # Fetch token events
-                token_events = await relay.fetch_events(
-                    [
-                        {
-                            "authors": [wallet._get_pubkey()],
-                            "kinds": [7375],  # Token events
-                            "limit": 50,
-                        }
-                    ]
+        # Show recovered balance and proofs
+        print("\n💰 Recovered Wallet State:")
+        balance = await wallet.get_balance(check_proofs=False)
+        print(f"   Balance: {balance} sats")
+
+        state = await wallet.fetch_wallet_state(check_proofs=False)
+        print(f"   Proofs: {len(state.proofs)}")
+
+        if state.proofs:
+            # Group by mint
+            proofs_by_mint: dict[str, int] = {}
+            for proof in state.proofs:
+                mint_url = proof.get("mint") or "unknown"
+                proofs_by_mint[mint_url] = (
+                    proofs_by_mint.get(mint_url, 0) + proof["amount"]
                 )
 
-                print(f"    Found {len(token_events)} token events")
-                all_token_events.extend(token_events)
+            print("   Balance by mint:")
+            for mint_url, amount in proofs_by_mint.items():
+                print(f"     {mint_url}: {amount} sats")
 
-            except Exception as e:
-                print(f"    ❌ Error: {e}")
-
-        # 4. Analyze events for proof content
-        print(f"\n🔍 Analyzing {len(all_token_events)} total events:")
-
-        # Deduplicate events by ID
-        unique_events = {}
-        for event in all_token_events:
-            unique_events[event["id"]] = event
-
-        print(f"  Unique events: {len(unique_events)}")
-
-        # Parse events to find proofs
-        all_found_proofs = []
-        parsing_errors = 0
-
-        for event_id, event in unique_events.items():
+        # Validate recovered proofs
+        if balance > 0:
+            print("\n🔍 Validating recovered proofs with mints...")
             try:
-                # Try to decrypt content
-                decrypted = wallet._nip44_decrypt(event["content"])
-                token_data = json.loads(decrypted)
-
-                proofs = token_data.get("proofs", [])
-                mint_url = token_data.get("mint", "unknown")
-                total_amount = sum(p.get("amount", 0) for p in proofs)
-
-                print(
-                    f"    Event {event_id[:8]}...: {len(proofs)} proofs, {total_amount} sats from {mint_url}"
-                )
-
-                # Check if this event should be deleted
-                deleted_ids = token_data.get("del", [])
-                if deleted_ids:
-                    print(f"      Deletes: {len(deleted_ids)} old events")
-
-                all_found_proofs.extend(proofs)
-
+                validated_balance = await wallet.get_balance(check_proofs=True)
+                if validated_balance == balance:
+                    print("✅ All recovered proofs are valid!")
+                elif validated_balance < balance:
+                    spent_amount = balance - validated_balance
+                    print(f"⚠️  {spent_amount} sats worth of proofs are spent")
+                    print(f"   Valid balance: {validated_balance} sats")
+                else:
+                    print("🤔 Unexpected validation result")
             except Exception as e:
-                parsing_errors += 1
-                print(f"    ❌ Parse error for {event_id[:8]}...: {e}")
+                print(f"❌ Validation failed: {e}")
 
-        if parsing_errors > 0:
-            print(f"  ⚠️  {parsing_errors} events couldn't be parsed")
+        print(f"\n🎉 Recovery demonstration complete!")
+        print(f"   Total recovered: {balance} sats across {len(state.proofs)} proofs")
 
-        # 5. Compare found proofs vs local state
-        total_found_amount = sum(p.get("amount", 0) for p in all_found_proofs)
-        print("\n📊 Proof Analysis:")
-        print(
-            f"  Total proofs found on relays: {len(all_found_proofs)} worth {total_found_amount} sats"
-        )
-        print(
-            f"  Local unvalidated state: {len(unvalidated_state.proofs)} worth {unvalidated_state.balance} sats"
-        )
-        print(
-            f"  Local validated state: {len(validated_state.proofs)} worth {validated_state.balance} sats"
-        )
 
-        # 6. Recovery recommendations
-        print("\n🔧 Recovery Recommendations:")
-
-        if pending_proofs:
-            print(
-                f"  ✅ Wait for relay queue processing ({sum(p.get('amount', 0) for p in pending_proofs)} sats pending)"
-            )
-
-        if total_found_amount > unvalidated_state.balance:
-            difference = total_found_amount - unvalidated_state.balance
-            print(
-                f"  💡 Found {difference} extra sats on relays - try refreshing wallet state"
-            )
-
-        if unvalidated_state.balance > validated_state.balance:
-            spent_amount = unvalidated_state.balance - validated_state.balance
-            print(
-                f"  🧹 Run cleanup tool to remove {spent_amount} sats in spent proofs"
-            )
-            print("     Command: python examples/cleanup_spent_proofs.py")
-
-        if parsing_errors > 0:
-            print("  🔑 Some events couldn't be decrypted - check NSEC key")
-
-        print("\n📋 Next Steps:")
-        print("  1. Wait 30 seconds for relay synchronization")
-        print("  2. Check balance again: nuts balance --nostr-debug")
-        print("  3. If still missing, run: python examples/refresh_proofs.py")
-        print("  4. Contact support if proofs are permanently lost")
+async def show_recovery_info():
+    """Show information about wallet recovery."""
+    print("💡 Wallet Recovery Information:")
+    print("=" * 40)
+    print()
+    print("✅ What gets recovered automatically:")
+    print("   • Wallet configuration (mints, settings)")
+    print("   • All token proofs stored on Nostr")
+    print("   • Transaction history")
+    print("   • Relay configuration")
+    print()
+    print("🔑 What you need for recovery:")
+    print("   • Your Nostr private key (nsec)")
+    print("   • Access to the same Nostr relays")
+    print()
+    print("⚡ Recovery is automatic:")
+    print("   • Just create a wallet with your nsec")
+    print("   • The wallet fetches all data from relays")
+    print("   • No manual backup files needed")
+    print()
 
 
 async def main():
-    """Main recovery function."""
-    try:
-        await check_missing_proofs()
-    except KeyboardInterrupt:
-        print("\n\nRecovery scan cancelled.")
-    except Exception as e:
-        print(f"\n❌ Recovery scan failed: {e}")
+    """Main function."""
+    # Demo NSEC - replace with your own for real recovery
+    demo_nsec = "nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
+
+    await show_recovery_info()
+    await demonstrate_recovery(demo_nsec)
 
 
 if __name__ == "__main__":

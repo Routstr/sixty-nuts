@@ -1,27 +1,20 @@
 # Sixty Nuts Examples
 
-This directory contains example scripts demonstrating various features of the sixty_nuts library. Each example serves as both a learning resource and an integration test.
+This directory contains example scripts demonstrating the core features of the sixty_nuts library. Each example is focused on a specific use case and designed to be educational and easy to understand.
 
 ## Prerequisites
 
-Before running the examples, you need to install the dependencies:
+Before running the examples, install the dependencies:
 
-1. Install [uv](https://github.com/astral-sh/uv) (a fast Python package manager):
+```bash
+# Install uv (fast Python package manager)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
+# Install dependencies
+uv sync
+```
 
-2. Install dependencies using uv:
-
-   ```bash
-   # From the project root directory
-   uv sync
-   ```
-
-This will install all required dependencies including the sixty_nuts library itself.
-
-## Basic Operations
+## Basic Wallet Operations
 
 ### mint_and_send.py
 
@@ -33,10 +26,18 @@ python mint_and_send.py
 
 ### check_balance_and_proofs.py
 
-Check wallet balance and see detailed breakdown by mint and denomination.
+Check wallet balance with detailed breakdown by mint and denomination.
 
 ```bash
 python check_balance_and_proofs.py
+```
+
+### redeem_token.py
+
+Simple token redemption into your wallet.
+
+```bash
+python redeem_token.py cashuAey...
 ```
 
 ### send_to_lightning_address.py
@@ -47,60 +48,11 @@ Send tokens to any Lightning Address (LNURL).
 python send_to_lightning_address.py user@getalby.com 1000
 ```
 
-### clear_wallet.py
-
-Melt all tokens back to Lightning, clearing the wallet.
-
-```bash
-python clear_wallet.py
-```
-
-## Advanced Token Management
-
-### redeem_token.py
-
-Simple token redemption into your wallet.
-
-```bash
-# Redeem a token
-python redeem_token.py cashuAey...
-
-# Redeem from file
-python redeem_token.py $(cat token.txt)
-```
-
-### split_tokens.py
-
-Split tokens into specific denominations for privacy or payment preparation.
-
-```bash
-# Split into multiple amounts
-python split_tokens.py 100 50 25 10 5
-
-# Prepare exact amount token
-python split_tokens.py 137
-```
-
-### validate_token.py
-
-Validate tokens before accepting them - essential for merchants.
-
-```bash
-# Simple validation
-python validate_token.py cashuAey...
-
-# Merchant acceptance flow
-python validate_token.py merchant cashuAey... 1000
-
-# Batch validation
-python validate_token.py batch token1 token2 token3
-```
-
 ## Payment Processing
 
 ### merchant_accept_token.py
 
-Accept tokens from any mint and automatically swap to your trusted mint.
+Accept tokens from customers and automatically swap from untrusted mints.
 
 ```bash
 python merchant_accept_token.py cashuAey...
@@ -114,231 +66,129 @@ Create Lightning invoices and monitor for payment in real-time.
 python monitor_payments.py
 ```
 
-### one_off_redeem.py
+### validate_token.py
 
-Use temporary wallets for one-off token redemptions without storing keys.
+Validate tokens before accepting them - essential for merchants.
 
 ```bash
-# Single redemption
-python one_off_redeem.py cashuAey... user@getalby.com
+python validate_token.py cashuAey...
+```
 
-# Batch redemption
-python one_off_redeem.py user@getalby.com token1 token2 token3
+## Token Management
+
+### split_tokens.py
+
+Split tokens into specific denominations for payments or privacy.
+
+```bash
+# Create multiple specific amounts
+python split_tokens.py 100 50 25 10
+
+# Create one exact amount
+python split_tokens.py 137
+```
+
+### refresh_proofs.py
+
+Refresh all proofs for privacy - swaps old proofs for new optimized ones.
+
+```bash
+python refresh_proofs.py
 ```
 
 ## Multi-Mint Operations
 
 ### multi_mint_operations.py
 
-Work with multiple mints, check balances per mint, and move funds between mints.
+Work with multiple mints and check balances per mint.
 
 ```bash
 python multi_mint_operations.py
 ```
 
-### auto_multi_mint_melt.py
+## Advanced Features
 
-Demonstrates the enhanced melt functionality that automatically consolidates proofs from multiple mints when no single mint has enough balance to pay a Lightning invoice.
+### one_off_redeem.py
 
-```bash
-python auto_multi_mint_melt.py
-```
-
-Features:
-
-- Automatic invoice amount detection
-- Total balance verification across all mints
-- Smart mint selection based on balance
-- Automatic proof consolidation when needed
-- Transparent fee handling
-
-This is particularly useful when your funds are distributed across multiple mints and you need to pay an invoice larger than any single mint's balance.
-
-## Wallet Maintenance & Backup
-
-### refresh_proofs.py
-
-Refresh all proofs for privacy - swaps old proofs for new ones at the mint.
+Redeem tokens without storing them in a persistent wallet.
 
 ```bash
-# Refresh with default backup directory
-python refresh_proofs.py
+# Redeem to temporary wallet
+python one_off_redeem.py cashuAey...
 
-# Specify custom backup directory
-python refresh_proofs.py /path/to/backups
+# Redeem and forward to Lightning address
+python one_off_redeem.py user@getalby.com cashuAey...
 ```
 
-Features:
+### clear_wallet.py
 
-- Backs up all proofs before refreshing
-- Consolidates small proofs into larger ones
-- Maintains privacy by breaking proof chains
-- Creates recovery instructions if needed
-- Automatically handles mint limits (batches large sets of proofs)
-
-### restore_proofs.py
-
-Restore proofs from a backup file created by refresh_proofs.py.
+Empty your wallet by converting all tokens back to Lightning.
 
 ```bash
-python restore_proofs.py proof_backups/proofs_backup_20240115_123456.json
+python clear_wallet.py
 ```
 
-### export_all_tokens.py
+### recovery_tool.py
 
-Export all wallet proofs as standard Cashu tokens for backup or transfer.
+Demonstrates wallet recovery from Nostr relays using just your private key.
 
 ```bash
-python export_all_tokens.py
+python recovery_tool.py
 ```
 
-Creates timestamped token files that can be:
+### queued_relay_demo.py
 
-- Imported into any Cashu wallet
-- Used as cold storage backup
-- Shared for payment
-
-**⚠️ Security Note**: Exported tokens contain actual money. Keep them secure!
-
-### diagnose_duplicates.py
-
-Diagnose duplicate proofs and balance inconsistencies in your wallet.
+Shows how queued relays improve performance and reliability.
 
 ```bash
-python diagnose_duplicates.py
+python queued_relay_demo.py
 ```
 
-Features:
+## Getting Started
 
-- Identifies duplicate proofs stored in multiple events
-- Shows actual vs reported balance
-- Validates proofs with mint
-- Provides clear recommendations
+1. **First time users**: Start with `mint_and_send.py` to understand the basic flow
+2. **Merchants**: Check out `merchant_accept_token.py` and `validate_token.py`
+3. **Privacy users**: Try `refresh_proofs.py` and `split_tokens.py`
+4. **Advanced users**: Explore `multi_mint_operations.py` and `recovery_tool.py`
 
-### cleanup_spent_proofs.py
+## Important Notes
 
-Remove spent proofs and duplicates from the wallet.
-
-```bash
-python cleanup_spent_proofs.py
-```
-
-Features:
-
-- Validates all proofs with the mint
-- Identifies and removes spent proofs
-- Cleans up duplicate entries
-- Shows before/after balance comparison
-
-### force_wallet_cleanup.py
-
-Force a complete wallet cleanup when the state is severely corrupted.
-
-```bash
-python force_wallet_cleanup.py
-```
-
-Features:
-
-- Deletes ALL token events (including duplicates)
-- Validates all unique proofs with the mint
-- Republishes only valid proofs in clean events
-- Use as last resort when other cleanup methods fail
-
-### cleanup_with_pow.py
-
-Cleanup wallet with automatic Proof-of-Work support for relays that require it.
-
-```bash
-python cleanup_with_pow.py
-```
-
-Features:
-
-- Automatically mines PoW when relays require it
-- Handles 28+ bit difficulty requirements
-- Shows progress during mining
-- Cleans up spent proofs efficiently
-
-### test_pow.py
-
-Test the Proof-of-Work implementation.
-
-```bash
-python test_pow.py
-```
-
-Features:
-
-- Tests PoW mining at different difficulties
-- Verifies PoW correctness
-- Tests relay integration with PoW
-- Shows mining performance
-
-## Common Patterns
-
-### Error Handling
-
-All examples include proper error handling and user-friendly messages.
-
-### Async/Await
-
-All operations use Python's async/await for efficient concurrent operations.
-
-### Context Managers
-
-Examples use `async with Wallet(...)` to ensure proper resource cleanup.
-
-### Type Hints
-
-Full type annotations for better IDE support and code clarity.
-
-## Testing with Examples
-
-These examples can be used as integration tests:
-
-```bash
-# Run all examples (requires funded wallet)
-for script in *.py; do
-    echo "Running $script..."
-    python "$script"
-done
-```
+- All examples use the same demo private key for consistency
+- Replace the `nsec` with your own for production use
+- Some examples require command-line arguments - run without args to see usage
+- Examples demonstrate best practices and proper error handling
 
 ## Troubleshooting
 
-### Inconsistent Balances
+### No Balance
 
-If you see different balances when running `check_balance_and_proofs.py`:
+If you see zero balance, you need to fund your wallet first:
 
-1. Run `diagnose_duplicates.py` to identify the issue
-2. Run `cleanup_spent_proofs.py` to remove spent/duplicate proofs
-3. Run `refresh_proofs.py` to consolidate remaining proofs
+```bash
+python mint_and_send.py  # Creates Lightning invoice to fund wallet
+```
 
-If the problem persists:
+### Validation Errors
 
-Run `force_wallet_cleanup.py` as a last resort to completely rebuild the wallet state
+If tokens fail validation:
 
-### Mint Errors (422)
+```bash
+python validate_token.py <your_token>  # Check token validity
+```
 
-If you get a "422" error about too many inputs:
+### Missing Funds
 
-- The mint has a limit (usually 1000) on inputs per request
-- The `refresh_proofs.py` script automatically handles this by batching
-- For manual operations, split large proof sets into smaller batches
+If you're missing funds after operations:
 
-### Relay Errors (PoW Required)
+```bash
+python recovery_tool.py  # Shows recovery information
+```
 
-If you see "pow: 28 bits needed" errors:
+## Common Patterns
 
-- The relay requires Proof-of-Work to prevent spam
-- Use `cleanup_with_pow.py` which automatically mines PoW
-- PoW mining can take 10-60 seconds for 28 bits
-- The implementation uses multiple CPU cores for faster mining
+All examples follow these patterns:
 
-## Notes
-
-- All examples use the same test wallet key for consistency
-- Replace the `nsec` with your own for production use
-- Some examples require command-line arguments - run without args to see usage
-- Examples demonstrate best practices for the library
+- **Async/Await**: All operations use Python's async/await
+- **Context Managers**: Use `async with Wallet(...)` for proper cleanup
+- **Error Handling**: Proper exception handling with user-friendly messages
+- **Type Hints**: Full type annotations for better IDE support

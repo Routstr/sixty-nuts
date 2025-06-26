@@ -1,85 +1,97 @@
 #!/usr/bin/env python3
-"""Demonstration of queued relay functionality in sixty_nuts wallet.
+"""Example: Queued relay operations.
 
-This example shows how the wallet can queue events for publishing while
-immediately including pending proofs in balance calculations.
+Shows how the wallet uses queued relays for better performance and reliability.
+Queued relays batch operations and handle failures gracefully.
 """
 
 import asyncio
-import time
-from sixty_nuts import Wallet
+from sixty_nuts.wallet import Wallet
+
+
+async def demonstrate_queued_operations(wallet: Wallet):
+    """Show how queued relays handle multiple operations efficiently."""
+    print("📡 Demonstrating queued relay operations...")
+
+    # Check if queued relays are enabled
+    if wallet.relay_manager.use_queued_relays:
+        print("✅ Queued relays are enabled")
+
+        # Show relay pool status
+        if wallet.relay_manager.relay_pool:
+            pool_size = len(wallet.relay_manager.relay_pool.relays)
+            print(f"📊 Relay pool size: {pool_size} relays")
+
+    else:
+        print("❌ Queued relays are disabled")
+        return
+
+    # Get current balance (this uses queued operations)
+    print("\n💰 Getting balance (uses queued relay operations)...")
+    balance = await wallet.get_balance()
+    print(f"Balance: {balance} sats")
+
+    # Create a small token (this will queue operations for publishing)
+    if balance >= 10:
+        print("\n📦 Creating token (operations will be queued)...")
+        try:
+            token = await wallet.send(5)
+            print(f"✅ Token created: {token[:50]}...")
+
+            # Show pending operations if any
+            if wallet.relay_manager.relay_pool:
+                pending = wallet.relay_manager.relay_pool.get_pending_proofs()
+                if pending:
+                    print(f"📤 Pending proofs in queue: {len(pending)}")
+
+        except Exception as e:
+            print(f"❌ Failed to create token: {e}")
+
+    else:
+        print("\n💡 Not enough balance to demonstrate token creation")
+
+    # Show final status
+    print("\n📈 Queued relay operations completed")
+
+
+async def show_relay_status(wallet: Wallet):
+    """Show current relay configuration and status."""
+    print("\n🌐 Relay Configuration:")
+    print(f"   Configured relays: {len(wallet.relays)}")
+    for i, relay in enumerate(wallet.relays, 1):
+        print(f"   {i}. {relay}")
+
+    print(
+        f"   Queued relays: {'✅ Enabled' if wallet.relay_manager.use_queued_relays else '❌ Disabled'}"
+    )
+
+    try:
+        connections = await wallet.relay_manager.get_relay_connections()
+        print(f"   Active connections: {len(connections)}")
+    except Exception as e:
+        print(f"   Connection status: ❌ Error ({e})")
 
 
 async def main():
-    # Create wallet with queued relay support (enabled by default)
-    wallet = Wallet(
-        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx",  # Replace with actual nsec
-        mint_urls=["https://mint.minibits.cash/Bitcoin"],
-        relays=["wss://relay.damus.io", "wss://relay.nostr.band"],
-    )
+    """Main function."""
+    print("📡 Queued Relay Demo")
+    print("=" * 30)
 
-    async with wallet:
-        print("=== Queued Relay Demo ===\n")
+    async with Wallet(
+        nsec="nsec1vl83hlk8ltz85002gr7qr8mxmsaf8ny8nee95z75vaygetnuvzuqqp5lrx"
+    ) as wallet:
+        # Show relay configuration
+        await show_relay_status(wallet)
 
-        # Check initial balance
-        initial_balance = await wallet.get_balance()
-        print(f"Initial balance: {initial_balance} sats")
+        # Demonstrate queued operations
+        await demonstrate_queued_operations(wallet)
 
-        # For demonstration, we need some funds to create a token
-        if initial_balance < 10:
-            print("\n⚠️  Need at least 10 sats for demo. Please fund the wallet first.")
-            print("You can use 'mint_and_send.py' to add funds.")
-            return
-
-        # Create a token from our balance for demonstration
-        demo_amount = min(
-            10, initial_balance // 2
-        )  # Use half balance or 10 sats, whichever is smaller
-        print(f"\nCreating {demo_amount} sat token for demo...")
-        token = await wallet.send(demo_amount)
-        print("Token created!")
-
-        # Wait a moment for the send operation to complete
-        await asyncio.sleep(1)
-
-        # Check balance after creating token
-        balance_after_send = await wallet.get_balance()
-        print(f"Balance after creating token: {balance_after_send} sats")
-
-        print(f"\nRedeeming {demo_amount} sat token...")
-        start_time = time.time()
-
-        # This will queue events instead of blocking
-        amount, unit = await wallet.redeem(token)
-
-        redeem_time = time.time() - start_time
-        print(f"Redeem completed in {redeem_time:.2f}s (non-blocking)")
-
-        # Check balance immediately - includes pending proofs!
-        immediate_balance = await wallet.get_balance()
-        print(f"Balance (with pending): {immediate_balance} sats")
-
-        # The events are being published in the background
-        print("\nEvents are being published in background...")
-
-        # Wait a bit for publishing to complete
-        await asyncio.sleep(2)
-
-        # Check balance again after publishing
-        final_balance = await wallet.get_balance()
-        print(f"Balance (after publish): {final_balance} sats")
-
-        # Demonstrate queue status
-        if wallet._use_queued_relays and wallet.relay_pool:
-            queue_size = wallet.relay_pool.shared_queue.size
-            print(f"\nQueue status: {queue_size} events pending")
-
-        print("\nDemo complete!")
-        print(
-            f"Final balance should be close to initial: {final_balance} sats (started with {initial_balance})"
-        )
+        print("\n💡 Key benefits of queued relays:")
+        print("   • Batched operations for better performance")
+        print("   • Automatic retries on failures")
+        print("   • Reduced relay load")
+        print("   • Better handling of slow/unreliable relays")
 
 
 if __name__ == "__main__":
-    # Run the demo
     asyncio.run(main())
