@@ -58,7 +58,7 @@ async def validate_token(token: str):
                 print(f"   ... and {len(proofs) - 3} more proofs")
 
             # Summary
-            print(f"\n📈 Validation Results:")
+            print("\n📈 Validation Results:")
             print(f"   ✅ Unspent: {unspent_count} proofs")
             print(f"   ❌ Spent: {spent_count} proofs")
 

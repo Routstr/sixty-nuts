@@ -28,7 +28,7 @@ async def check_multi_mint_balance(wallet: Wallet):
         mint_url = proof.get("mint") or "unknown"
         mint_balances[mint_url] = mint_balances.get(mint_url, 0) + proof["amount"]
 
-    print(f"\n💰 Balance by mint:")
+    print("\n💰 Balance by mint:")
     total = 0
     for mint_url, balance in mint_balances.items():
         print(f"   📍 {mint_url}: {balance} sats")
@@ -71,6 +71,7 @@ async def main():
 
         # Check balances across mints
         balances = await check_multi_mint_balance(wallet)
+        print(f"💳 Balances: {balances} sats")
 
         # Example: Add a new mint
         if len(MINTS) > 2:

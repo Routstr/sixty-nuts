@@ -16,7 +16,7 @@ async def create_and_monitor_invoice(wallet: Wallet, amount: int, timeout: int =
     # Create invoice and get monitoring task
     invoice, payment_task = await wallet.mint_async(amount, timeout=timeout)
 
-    print(f"\n⚡ Lightning Invoice:")
+    print("\n⚡ Lightning Invoice:")
     print(invoice)
     print(f"\n⏰ Monitoring for payment (timeout: {timeout}s)...")
     print("💡 Pay the invoice above to complete the demonstration")

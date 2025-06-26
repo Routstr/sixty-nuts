@@ -23,7 +23,7 @@ async def clear_wallet_to_lightning(wallet: Wallet, destination_invoice: str):
 
     try:
         # Pay the invoice (this will use all available proofs)
-        print(f"⚡ Paying Lightning invoice...")
+        print("⚡ Paying Lightning invoice...")
         await wallet.melt(destination_invoice)
 
         print("✅ Successfully paid Lightning invoice!")
@@ -117,11 +117,11 @@ async def main():
             print("\n✅ Wallet is already empty - nothing to clear!")
             return
 
-        print(f"\n💡 You can clear this wallet by:")
+        print("\n💡 You can clear this wallet by:")
         print(f"   1. Paying a Lightning invoice for {balance} sats")
-        print(f"   2. Sending to a Lightning address (leaving ~2 sats for fees)")
+        print("   2. Sending to a Lightning address (leaving ~2 sats for fees)")
         print(
-            f"\n🔒 This example is read-only - uncomment code below to actually clear"
+            "\n🔒 This example is read-only - uncomment code below to actually clear"
         )
 
         # Example clearance methods (commented out for safety)

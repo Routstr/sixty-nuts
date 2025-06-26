@@ -28,6 +28,7 @@ async def split_tokens(wallet: Wallet, target_amounts: list[int]):
 
     # Get current wallet state
     state = await wallet.fetch_wallet_state(check_proofs=False)
+    print(f"💳 Current balance: {state.balance} sats")
 
     # For each target amount, try to create exact tokens
     created_tokens = []

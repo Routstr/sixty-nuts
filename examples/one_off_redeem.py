@@ -49,7 +49,7 @@ async def redeem_to_wallet(token: str):
             mint_url, unit, proofs = temp_wallet._parse_cashu_token(token)
             total_value = sum(p["amount"] for p in proofs)
 
-            print(f"📋 Token Details:")
+            print("📋 Token Details:")
             print(f"   Value: {total_value} {unit}")
             print(f"   Mint: {mint_url}")
             print(f"   Proofs: {len(proofs)}")

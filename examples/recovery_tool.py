@@ -33,7 +33,7 @@ async def demonstrate_recovery(nsec: str):
             print("⚠️  No wallet configuration found on relays")
 
         # Show recovered configuration
-        print(f"\n🏦 Recovered Configuration:")
+        print("\n🏦 Recovered Configuration:")
         print(f"   Mints: {len(wallet.mint_urls)}")
         for i, mint_url in enumerate(wallet.mint_urls, 1):
             print(f"   {i}. {mint_url}")
@@ -79,7 +79,7 @@ async def demonstrate_recovery(nsec: str):
             except Exception as e:
                 print(f"❌ Validation failed: {e}")
 
-        print(f"\n🎉 Recovery demonstration complete!")
+        print("\n🎉 Recovery demonstration complete!")
         print(f"   Total recovered: {balance} sats across {len(state.proofs)} proofs")
 
 

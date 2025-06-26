@@ -20,7 +20,7 @@ async def accept_token(wallet: Wallet, token: str, auto_swap: bool = True):
         mint_url, unit, proofs = wallet._parse_cashu_token(token)
         total_value = sum(p["amount"] for p in proofs)
 
-        print(f"📋 Token Details:")
+        print("📋 Token Details:")
         print(f"   Value: {total_value} {unit}")
         print(f"   From Mint: {mint_url}")
         print(f"   Proofs: {len(proofs)}")
@@ -36,7 +36,7 @@ async def accept_token(wallet: Wallet, token: str, auto_swap: bool = True):
         balance_before = await wallet.get_balance()
 
         # Redeem the token (auto_swap handles untrusted mints)
-        print(f"\n💰 Redeeming token...")
+        print("\n💰 Redeeming token...")
         amount, received_unit = await wallet.redeem(token, auto_swap=auto_swap)
 
         # Get balance after
