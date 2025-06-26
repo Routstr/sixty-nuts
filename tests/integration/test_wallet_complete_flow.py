@@ -27,14 +27,32 @@ def test_nsec():
 
 @pytest.fixture
 def test_mint_urls():
-    """Test mint URLs for integration tests."""
-    return ["http://localhost:3338"]
+    """Test mint URLs for integration tests.
+
+    Uses local Docker mint when USE_LOCAL_SERVICES is set,
+    otherwise uses public test mint.
+    """
+    if os.getenv("USE_LOCAL_SERVICES"):
+        return ["http://localhost:3338"]
+    else:
+        return ["https://testnut.cashu.space"]
 
 
 @pytest.fixture
 def test_relays():
-    """Test relay URLs for integration tests."""
-    return ["ws://localhost:8080"]
+    """Test relay URLs for integration tests.
+
+    Uses local Docker relay when USE_LOCAL_SERVICES is set,
+    otherwise uses public relays.
+    """
+    if os.getenv("USE_LOCAL_SERVICES"):
+        return ["ws://localhost:8080"]
+    else:
+        return [
+            "wss://relay.damus.io",
+            "wss://relay.primal.net",
+            "wss://relay.nostr.band",
+        ]
 
 
 @pytest.fixture
@@ -460,11 +478,24 @@ if __name__ == "__main__":
     # Run a simple test
     async def main():
         nsec = generate_privkey()
+
+        # Use same logic as fixtures
+        if os.getenv("USE_LOCAL_SERVICES"):
+            mint_urls = ["http://localhost:3338"]
+            relays = ["ws://localhost:8080"]
+        else:
+            mint_urls = ["https://testnut.cashu.space"]
+            relays = [
+                "wss://relay.damus.io",
+                "wss://relay.primal.net",
+                "wss://relay.nostr.band",
+            ]
+
         wallet = await Wallet.create(
             nsec=nsec,
-            mint_urls=["http://localhost:3338"],
+            mint_urls=mint_urls,
             currency="sat",
-            relays=["ws://localhost:8080"],
+            relays=relays,
             auto_init=False,
         )
 

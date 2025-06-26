@@ -171,6 +171,7 @@ def run_tests():
 
     env = os.environ.copy()
     env["RUN_INTEGRATION_TESTS"] = "1"
+    env["USE_LOCAL_SERVICES"] = "1"  # Use local Docker services
 
     # Run only integration tests
     cmd = [

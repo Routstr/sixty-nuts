@@ -22,19 +22,37 @@ The easiest way to run integration tests is using the automated script that mana
 
 ```bash
 # From the project root
-./run_integration_tests.sh
+python tests/run_integration.py
 ```
 
 This script will:
 
 1. Start fresh Docker containers (mint + relay)
 2. Wait for services to be ready
-3. Run all integration tests
-4. Clean up containers afterward
+3. Set `USE_LOCAL_SERVICES=1` to use local services
+4. Run all integration tests
+5. Clean up containers afterward
 
-### Method 2: Manual Docker + pytest
+### Method 2: Against Public Services (No Docker Required)
 
-If you prefer manual control:
+You can run tests directly against public services without Docker:
+
+```bash
+# Set environment variable to enable integration tests
+export RUN_INTEGRATION_TESTS=1
+
+# Run tests (will automatically use public services)
+pytest tests/integration/ -v
+```
+
+This mode uses:
+
+- **Mint**: `https://testnut.cashu.space`
+- **Relays**: `wss://relay.damus.io`, `wss://relay.primal.net`, `wss://relay.nostr.band`
+
+### Method 3: Manual Docker + pytest
+
+If you prefer manual control over Docker services:
 
 ```bash
 # Start services
@@ -43,23 +61,13 @@ docker-compose up -d
 # Wait for services to be ready (check logs)
 docker-compose logs -f
 
-# In another terminal, run integration tests
-RUN_INTEGRATION_TESTS=1 pytest tests/integration/ -v
+# In another terminal, run integration tests with local services
+export RUN_INTEGRATION_TESTS=1
+export USE_LOCAL_SERVICES=1
+pytest tests/integration/ -v
 
 # Clean up
 docker-compose down -v
-```
-
-### Method 3: Against External Services
-
-You can run tests against existing services by setting the environment variables:
-
-```bash
-export RUN_INTEGRATION_TESTS=1
-export TEST_MINT_URL=https://testnut.cashu.space
-export TEST_RELAY_URL=wss://relay.damus.io
-
-pytest tests/integration/ -v
 ```
 
 ## Test Categories
@@ -123,13 +131,32 @@ Each test run uses fresh containers with no persistent data, ensuring:
 Integration tests are controlled by environment variables:
 
 - `RUN_INTEGRATION_TESTS=1` - Must be set to run integration tests
-- Without this variable, integration tests are skipped
+- `USE_LOCAL_SERVICES=1` - Optional: Use local Docker services instead of public services
+
+### Service Selection
+
+The tests automatically choose which services to use:
+
+**Without `USE_LOCAL_SERVICES` (default):**
+
+- **Mint**: `https://testnut.cashu.space` (public test mint)
+- **Relays**: Public Nostr relays (damus.io, primal.net, nostr.band)
+- **Requirements**: Internet connection only
+- **Best for**: Quick testing, CI/CD, development without Docker
+
+**With `USE_LOCAL_SERVICES=1`:**
+
+- **Mint**: `http://localhost:3338` (local Docker container)
+- **Relays**: `ws://localhost:8080` (local Docker container)
+- **Requirements**: Docker and docker-compose
+- **Best for**: Isolated testing, debugging, mint development
 
 This ensures:
 
 - `pytest` alone runs only unit tests
 - Integration tests run only when explicitly requested
-- CI/CD can control test execution
+- Services are automatically selected based on environment
+- No hardcoded service URLs in test code
 
 ## Debugging Integration Tests
 
@@ -341,3 +368,35 @@ The tests are designed to be robust against public relay quirks including rate l
 ### test_wallet_complete_flow.py
 
 Tests complete wallet operations that require both mint and relay services.
+
+## Quick Start Examples
+
+### Run against public services (no Docker needed)
+
+```bash
+# Simply enable integration tests - uses public services by default
+export RUN_INTEGRATION_TESTS=1
+pytest tests/integration/ -v
+```
+
+### Run with local Docker services
+
+```bash
+# Use the automated runner (recommended)
+python tests/run_integration.py
+
+# Or manually
+docker-compose up -d
+export RUN_INTEGRATION_TESTS=1
+export USE_LOCAL_SERVICES=1
+pytest tests/integration/ -v
+docker-compose down -v
+```
+
+### Quick verification
+
+```bash
+# Test that public services work
+export RUN_INTEGRATION_TESTS=1
+python tests/integration/test_wallet_complete_flow.py
+```

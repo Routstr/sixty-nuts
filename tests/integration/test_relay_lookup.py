@@ -63,8 +63,15 @@ def test_pubkey(test_privkey):
 
 @pytest.fixture
 def test_mint_urls():
-    """Test mint URLs for event manager tests."""
-    return ["https://mint.example.com"]
+    """Test mint URLs for event manager tests.
+
+    Uses local Docker mint when USE_LOCAL_SERVICES is set,
+    otherwise uses public test mint.
+    """
+    if os.getenv("USE_LOCAL_SERVICES"):
+        return ["http://localhost:3338"]
+    else:
+        return ["https://testnut.cashu.space"]
 
 
 @pytest.fixture
