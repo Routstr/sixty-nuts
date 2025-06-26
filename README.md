@@ -66,7 +66,7 @@ from sixty_nuts import Wallet
 
 async def main():
     # Create wallet with automatic relay/mint discovery
-    async with Wallet(nsec="your_nostr_private_key") as wallet:
+    async with Wallet(nsec="your_nsec_private_key") as wallet:
         # Check balance
         balance = await wallet.get_balance()
         print(f"Balance: {balance} sats")
@@ -319,13 +319,13 @@ from sixty_nuts import Wallet
 async def main():
     # Create wallet with explicit configuration
     wallet = await Wallet.create(
-        nsec="your_nostr_private_key",  # hex or nsec1... format
+        nsec="your_nsec_private_key",  # hex or nsec1... format
         mint_urls=["https://mint.minibits.cash/Bitcoin"],
         relays=["wss://relay.damus.io", "wss://nostr.wine"]
     )
     
     # Or use context manager for automatic cleanup
-    async with Wallet(nsec="your_private_key") as wallet:
+    async with Wallet(nsec="your_nsec_private_key") as wallet:
         # Wallet operations here
         pass
 
@@ -635,14 +635,6 @@ Please follow the existing code style and add comprehensive tests for new featur
 - [ ] **Multi-Mint Transactions**: Atomic operations across multiple mints
 - [ ] **Advanced Coin Selection**: Privacy-optimized proof selection algorithms
 - [ ] **Offline Operations**: Enhanced offline capability with delayed sync
-
-### 📋 Future Enhancements
-
-- [ ] **Web Interface**: Browser-based wallet interface
-- [ ] **Hardware Wallet Support**: Integration with hardware signing devices
-- [ ] **Backup/Restore Tools**: Enhanced backup and recovery mechanisms
-- [ ] **Performance Optimization**: Further optimization for large proof sets
-- [ ] **Advanced Privacy Features**: Coin mixing and enhanced privacy tools
 
 ## Troubleshooting
 
