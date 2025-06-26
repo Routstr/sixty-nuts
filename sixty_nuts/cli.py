@@ -22,8 +22,17 @@ except ImportError:
     HAS_QRCODE = False
 
 from .types import WalletError
-from .wallet import Wallet
+from .wallet import (
+    Wallet,
+    get_mints_from_env,
+    validate_mint_url,
+    POPULAR_MINTS,
+    MINTS_ENV_VAR,
+    set_mints_in_env,
+    clear_mints_from_env,
+)
 from .temp import redeem_to_lnurl
+from .relay import prompt_user_for_relays, RELAYS_ENV_VAR
 
 app = typer.Typer(
     name="nuts",
@@ -35,6 +44,205 @@ console = Console()
 # Environment variable for NSEC
 NSEC_ENV_VAR = "SIXTY_NUTS_NSEC"
 NSEC_FILE = Path.home() / ".sixty_nuts_nsec"
+
+
+async def prompt_user_for_mints() -> list[str]:
+    """Prompt user to select mint URLs interactively.
+
+    Returns:
+        List of selected mint URLs
+    """
+    console.print("\n[cyan]🏦 Mint Configuration[/cyan]")
+    console.print("No mint URLs are configured. Please select mints to use:")
+
+    # Check environment variable and .env file first
+    env_mints = get_mints_from_env()
+    if env_mints:
+        console.print(
+            f"\n[green]✅ Found {len(env_mints)} cached mints (env var or .env file):[/green]"
+        )
+        for i, mint in enumerate(env_mints, 1):
+            status = "✅ Valid" if validate_mint_url(mint) else "❌ Invalid"
+            console.print(f"  {i}. {mint} - {status}")
+
+        console.print(
+            "\n[yellow]Options:[/yellow] [dim](use, clear-cache, select-new)[/dim]"
+        )
+        choice = Prompt.ask(
+            "Use cached mints, clear cache, or select new",
+            choices=["use", "clear-cache", "select-new"],
+            default="use",
+        )
+
+        if choice == "use":
+            return env_mints
+        elif choice == "clear-cache":
+            cleared = clear_mints_from_env()
+            if cleared:
+                console.print("[green]🗑️ Cleared mint cache[/green]")
+            else:
+                console.print("[yellow]ℹ️ No mint cache to clear[/yellow]")
+            # Continue to selection below
+        # If "select-new", continue to manual selection
+
+    console.print(f"\n[yellow]📋 Popular Cashu Mints:[/yellow]")
+
+    # Create table for popular mints
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Mint URL", style="green")
+    table.add_column("Status", style="blue")
+
+    for i, mint_url in enumerate(POPULAR_MINTS, 1):
+        status = "🟢 Available"
+        table.add_row(str(i), mint_url, status)
+
+    console.print(table)
+
+    selected_mints: list[str] = []
+
+    while True:
+        console.print(f"\n[cyan]Current selection: {len(selected_mints)} mints[/cyan]")
+        if selected_mints:
+            for i, mint in enumerate(selected_mints, 1):
+                console.print(f"  {i}. {mint}")
+
+        console.print(
+            "\n[yellow]Options: [dim](number, url, 'done', 'clear', 'env')[/dim][/yellow]"
+        )
+
+        choice = Prompt.ask("Choice").strip()
+
+        if choice.lower() == "done":
+            if selected_mints:
+                break
+            else:
+                console.print("[red]⚠️  Please select at least one mint[/red]")
+                continue
+
+        elif choice.lower() == "clear":
+            selected_mints = []
+            console.print("[yellow]Selection cleared[/yellow]")
+            continue
+
+        elif choice.lower() == "env":
+            if selected_mints:
+                mint_str = ",".join(selected_mints)
+                console.print(f"\n[green]Add this to your shell profile:[/green]")
+                console.print(f"export {MINTS_ENV_VAR}={mint_str}")
+                console.print("\nOr run:")
+                console.print(f"echo 'export {MINTS_ENV_VAR}={mint_str}' >> ~/.bashrc")
+            else:
+                console.print("[yellow]No mints selected to save[/yellow]")
+            continue
+
+        elif choice.isdigit():
+            choice_num = int(choice)
+            if 1 <= choice_num <= len(POPULAR_MINTS):
+                mint_url = POPULAR_MINTS[choice_num - 1]
+                if mint_url not in selected_mints:
+                    selected_mints.append(mint_url)
+                    console.print(f"[green]✅ Added: {mint_url}[/green]")
+                else:
+                    console.print(f"[yellow]Already selected: {mint_url}[/yellow]")
+            else:
+                console.print(
+                    f"[red]Invalid choice. Please enter 1-{len(POPULAR_MINTS)}[/red]"
+                )
+
+        elif choice.startswith("http"):
+            # Custom mint URL
+            if validate_mint_url(choice):
+                if choice not in selected_mints:
+                    selected_mints.append(choice)
+                    console.print(f"[green]✅ Added custom mint: {choice}[/green]")
+                else:
+                    console.print(f"[yellow]Already selected: {choice}[/yellow]")
+            else:
+                console.print(f"[red]Invalid mint URL format: {choice}[/red]")
+                console.print(
+                    "[dim]URLs should start with http:// or https:// and not end with /[/dim]"
+                )
+
+        else:
+            console.print(f"[red]Invalid choice: {choice}[/red]")
+
+    console.print(f"\n[green]✅ Selected {len(selected_mints)} mints:[/green]")
+    for i, mint in enumerate(selected_mints, 1):
+        console.print(f"  {i}. {mint}")
+
+    # Automatically save to .env file for future use
+    try:
+        set_mints_in_env(selected_mints)
+        console.print("[blue]💾 Cached mints to .env file for future use[/blue]")
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Could not cache mints: {e}[/yellow]")
+
+    return selected_mints
+
+
+async def create_wallet_with_mint_selection(
+    nsec: str,
+    *,
+    mint_urls: list[str] | None = None,
+    prompt_for_relays: bool = True,
+) -> Wallet:
+    """Create a wallet, handling mint selection if needed.
+
+    Args:
+        nsec: Nostr private key
+        mint_urls: Optional mint URLs (if None, will try discovery/prompting)
+        prompt_for_relays: Whether to prompt for relays if needed
+
+    Returns:
+        Initialized wallet instance
+
+    Raises:
+        typer.Exit: If user cancels mint selection
+    """
+    try:
+        # Try to create wallet normally first
+        wallet = await Wallet.create(
+            nsec=nsec,
+            mint_urls=mint_urls,
+            prompt_for_relays=prompt_for_relays,
+        )
+        return wallet
+
+    except WalletError as e:
+        if "No mint URLs configured" in str(e):
+            # Mint selection needed
+            try:
+                selected_mints = await prompt_user_for_mints()
+                console.print("[blue]Creating wallet and saving to Nostr...[/blue]")
+
+                # Create wallet with selected mints
+                wallet = await Wallet.create(
+                    nsec=nsec,
+                    mint_urls=selected_mints,
+                    prompt_for_relays=prompt_for_relays,
+                )
+
+                # Automatically save to Nostr wallet event
+                try:
+                    async with wallet:
+                        await wallet.initialize_wallet(force=True)
+                    console.print(
+                        f"[green]✅ Wallet configured with {len(selected_mints)} mints and saved to Nostr![/green]"
+                    )
+                except Exception as e:
+                    console.print(
+                        f"[yellow]⚠️  Wallet created but failed to save to Nostr: {e}[/yellow]"
+                    )
+
+                return wallet
+
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Mint selection cancelled[/yellow]")
+                raise typer.Exit(1)
+        else:
+            # Re-raise other wallet errors
+            raise
 
 
 def get_nsec() -> str:
@@ -557,7 +765,9 @@ def balance(
 
     async def _balance() -> None:
         nsec = get_nsec()
-        async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+        # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+        async with wallet:
             console.print("[blue]Checking balance...[/blue]")
 
             if nostr_debug:
@@ -646,7 +856,9 @@ def send(
 
     async def _send():
         nsec = get_nsec()
-        async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+        # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+        async with wallet:
             if to_lnurl:
                 # Send directly to Lightning address
                 console.print(f"[blue]Sending {amount} sats to {to_lnurl}...[/blue]")
@@ -748,7 +960,11 @@ def redeem(
         else:
             # Normal redeem to wallet
             nsec = get_nsec()
-            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet = await create_wallet_with_mint_selection(
+                nsec=nsec, mint_urls=mint_urls
+            )
+            async with wallet:
                 console.print("[blue]Redeeming token...[/blue]")
 
                 # Check balance before
@@ -787,7 +1003,9 @@ def pay(
 
     async def _pay():
         nsec = get_nsec()
-        async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+        # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+        async with wallet:
             console.print("[blue]Paying Lightning invoice...[/blue]")
 
             # Check balance first
@@ -826,7 +1044,9 @@ def mint(
 
     async def _mint():
         nsec = get_nsec()
-        async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+        # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+        async with wallet:
             console.print(f"[blue]Creating invoice for {amount} sats...[/blue]")
 
             invoice, task = await wallet.mint_async(amount, timeout=timeout)
@@ -870,7 +1090,9 @@ def info(
 
     async def _info():
         nsec = get_nsec()
-        async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+        # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+        async with wallet:
             console.print("[blue]Fetching wallet information...[/blue]")
 
             # Get wallet state
@@ -920,8 +1142,230 @@ def main(
         typer.Option("--version", callback=version_callback, help="Show version"),
     ] = None,
 ) -> None:
-    """Sixty Nuts - NIP-60 Cashu Wallet CLI."""
+    """Sixty Nuts - NIP-60 Cashu Wallet CLI.
+
+    🌐 RELAY CONFIGURATION (auto-cached for speed):
+    Relays are discovered in priority order:
+    1. Environment variable: RELAYS="wss://relay1.com,wss://relay2.com" (fastest)
+    2. Auto-discovery from your Nostr profile (NIP-65) - cached in .env file
+    3. Interactive prompt (first run) - cached in .env file
+
+    💡 Performance tip: Set RELAYS env var or let discovery populate .env file
+    Visit https://nostr.watch to find more relays
+
+    📝 NSEC CONFIGURATION:
+    Your Nostr private key can be set via:
+    • Environment variable: SIXTY_NUTS_NSEC="nsec1..."
+    • Stored in ~/.sixty_nuts_nsec file
+    • Interactive prompt (secure input)
+    """
     pass
+
+
+@app.command()
+def relays(
+    list_configured: Annotated[
+        bool, typer.Option("--list", help="List currently configured relays")
+    ] = False,
+    test_connectivity: Annotated[
+        bool, typer.Option("--test", help="Test connectivity to configured relays")
+    ] = False,
+    discover: Annotated[
+        bool, typer.Option("--discover", help="Discover relays from your Nostr profile")
+    ] = False,
+    configure: Annotated[
+        bool, typer.Option("--configure", help="Configure relays interactively")
+    ] = False,
+    clear_cache: Annotated[
+        bool, typer.Option("--clear-cache", help="Clear relay cache (.env file)")
+    ] = False,
+) -> None:
+    """Manage Nostr relay configuration.
+
+    Examples:
+        nuts relays --list                    # Show current relays
+        nuts relays --test                    # Test relay connectivity
+        nuts relays --discover               # Find relays from your profile
+        nuts relays --configure              # Interactive relay setup
+        nuts relays --clear-cache            # Clear session cache
+        nuts relays --clear-cache --discover # Force fresh discovery
+    """
+
+    async def _relays():
+        from .relay import (
+            get_relays_from_env,
+            prompt_user_for_relays,
+            discover_relays_from_nip65,
+            validate_relay_url,
+            clear_relays_from_env,
+        )
+        from .crypto import decode_nsec, get_pubkey
+
+        # Handle cache clearing first
+        if clear_cache:
+            cleared = clear_relays_from_env()
+            if cleared:
+                console.print(
+                    f"[green]🗑️ Cleared relay cache from environment and .env file[/green]"
+                )
+                console.print("[dim]Next relay operation will do fresh discovery[/dim]")
+            else:
+                console.print("[yellow]ℹ️ No relay cache to clear[/yellow]")
+
+            # If only clearing cache, exit early
+            if not any([list_configured, test_connectivity, discover, configure]):
+                return
+
+        # If no flags specified, show current configuration
+        show_list = list_configured
+        if not any([list_configured, test_connectivity, discover, configure]):
+            show_list = True
+
+        if show_list:
+            console.print("\n[cyan]🌐 Current Relay Configuration[/cyan]")
+
+            # Check environment variable and .env file
+            env_relays = get_relays_from_env()
+            if env_relays:
+                console.print(
+                    f"[green]✅ Found {len(env_relays)} relays (env var or .env file):[/green]"
+                )
+                for i, relay in enumerate(env_relays, 1):
+                    status = "✅ Valid" if validate_relay_url(relay) else "❌ Invalid"
+                    console.print(f"  {i}. {relay} - {status}")
+                console.print(
+                    f"[dim]💡 Using fast path - no Nostr queries needed[/dim]"
+                )
+                console.print(
+                    f"[dim]Run 'nuts relays --clear-cache' to force fresh discovery[/dim]"
+                )
+            else:
+                console.print(
+                    "[yellow]⚠️ No relays in environment variable or .env file[/yellow]"
+                )
+                console.print(
+                    f'   Set with: export {RELAYS_ENV_VAR}="wss://relay1.com,wss://relay2.com"'
+                )
+                console.print(
+                    f"[dim]💡 Will auto-cache discovered relays in .env file[/dim]"
+                )
+
+        if discover:
+            console.print("\n[cyan]🔍 Discovering Relays from Nostr Profile[/cyan]")
+
+            # Check if we already have cached relays to inform user (unless cache was just cleared)
+            env_relays = get_relays_from_env()
+            if env_relays and not clear_cache:
+                console.print(
+                    "[blue]ℹ️ Cached relays found - skipping Nostr discovery for speed[/blue]"
+                )
+                console.print(
+                    "Use --list to see current relays or --clear-cache to force discovery"
+                )
+                return
+
+            try:
+                nsec = get_nsec()
+                privkey = decode_nsec(nsec)
+                pubkey = get_pubkey(privkey)
+
+                console.print(f"Looking up relays for: {pubkey}")
+                # Enable debug mode for discovery
+                discovered = await discover_relays_from_nip65(pubkey, debug=True)
+
+                if discovered:
+                    console.print(f"[green]✅ Found {len(discovered)} relays:[/green]")
+                    for i, relay in enumerate(discovered, 1):
+                        console.print(f"  {i}. {relay}")
+
+                    # Cache them in .env file
+                    from .relay import set_relays_in_env
+
+                    set_relays_in_env(discovered)
+                    console.print(f"[blue]💾 Cached relays in .env file[/blue]")
+                else:
+                    console.print(
+                        "[yellow]⚠️ No relays found in your Nostr profile[/yellow]"
+                    )
+                    console.print(
+                        "   Consider publishing a relay list (NIP-65) with your Nostr client"
+                    )
+                    console.print(
+                        "   Or run 'nuts relays --configure' to set up and publish relays"
+                    )
+
+            except Exception as e:
+                console.print(f"[red]❌ Discovery failed: {e}[/red]")
+
+        if test_connectivity:
+            console.print("\n[cyan]🔗 Testing Relay Connectivity[/cyan]")
+
+            # Get relays to test
+            env_relays = get_relays_from_env()
+            test_relays = env_relays
+
+            if not test_relays:
+                try:
+                    nsec = get_nsec()
+                    privkey = decode_nsec(nsec)
+                    pubkey = get_pubkey(privkey)
+                    test_relays = await discover_relays_from_nip65(pubkey)
+                except Exception:
+                    pass
+
+            if not test_relays:
+                console.print(
+                    "[yellow]⚠️ No relays to test. Use --configure to set up relays first.[/yellow]"
+                )
+                return
+
+            from .relay import NostrRelay
+
+            for i, relay_url in enumerate(test_relays, 1):
+                console.print(f"  {i}. Testing {relay_url}...")
+                try:
+                    relay = NostrRelay(relay_url)
+                    await relay.connect()
+                    console.print(f"     [green]✅ Connected successfully[/green]")
+                    await relay.disconnect()
+                except Exception as e:
+                    console.print(f"     [red]❌ Failed: {e}[/red]")
+
+        if configure:
+            console.print("\n[cyan]⚙️ Interactive Relay Configuration[/cyan]")
+            try:
+                nsec = get_nsec()
+                privkey = decode_nsec(nsec)
+                selected_relays = await prompt_user_for_relays(privkey)
+                console.print(
+                    f"\n[green]✅ Configuration complete with {len(selected_relays)} relays[/green]"
+                )
+
+                # Test discovery after configuration
+                console.print("\n[blue]🧪 Testing NIP-65 discovery...[/blue]")
+                pubkey = get_pubkey(privkey)
+                discovered = await discover_relays_from_nip65(pubkey, debug=True)
+
+                if discovered:
+                    console.print(
+                        f"[green]🎉 Discovery test successful! Found {len(discovered)} relays[/green]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]⚠️ Discovery test failed - you may need to wait a moment for relay propagation[/yellow]"
+                    )
+                    console.print(
+                        "[dim]Try running 'nuts relays --discover' in a few seconds[/dim]"
+                    )
+
+            except Exception as e:
+                console.print(f"[red]❌ Configuration failed: {e}[/red]")
+
+    try:
+        asyncio.run(_relays())
+    except Exception as e:
+        handle_wallet_error(e)
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -946,7 +1390,11 @@ def status(
     async def _status():
         try:
             nsec = get_nsec()
-            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet_obj:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet_obj = await create_wallet_with_mint_selection(
+                nsec=nsec, mint_urls=mint_urls
+            )
+            async with wallet_obj:
                 # Check if wallet exists
                 exists, existing_event = await wallet_obj.check_wallet_event_exists()
 
@@ -1164,7 +1612,11 @@ def erase(
 
             # Get NSEC for wallet operations (this will prompt if needed and file was just deleted)
             wallet_nsec = get_nsec()
-            async with Wallet(nsec=wallet_nsec, mint_urls=mint_urls) as wallet_obj:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet_obj = await create_wallet_with_mint_selection(
+                nsec=wallet_nsec, mint_urls=mint_urls
+            )
+            async with wallet_obj:
                 console.print("🔄 Scanning for events to erase...")
 
                 # Check what exists
@@ -1356,7 +1808,11 @@ def cleanup(
     async def _cleanup():
         try:
             nsec = get_nsec()
-            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet = await create_wallet_with_mint_selection(
+                nsec=nsec, mint_urls=mint_urls
+            )
+            async with wallet:
                 # Get current state for confirmation
                 current_balance = await wallet.get_balance(check_proofs=False)
                 token_count = await wallet.count_token_events()
@@ -1446,7 +1902,11 @@ def history(
     async def _history():
         try:
             nsec = get_nsec()
-            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet = await create_wallet_with_mint_selection(
+                nsec=nsec, mint_urls=mint_urls
+            )
+            async with wallet:
                 console.print("🔄 Fetching spending history...")
 
                 # Fetch history
@@ -1544,7 +2004,11 @@ def debug(
             debug_all = not any([history, balance, nostr, proofs, wallet])
 
             nsec = get_nsec()
-            async with Wallet(nsec=nsec, mint_urls=mint_urls) as wallet_obj:
+            # Use create_wallet_with_mint_selection for automatic mint discovery and selection
+            wallet_obj = await create_wallet_with_mint_selection(
+                nsec=nsec, mint_urls=mint_urls
+            )
+            async with wallet_obj:
                 console.print("🔍 [cyan]Wallet Debug Report[/cyan]")
                 console.print("=" * 60)
 
