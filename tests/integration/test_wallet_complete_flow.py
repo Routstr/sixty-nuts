@@ -2,6 +2,12 @@
 
 Tests the full wallet functionality against real mint and relay infrastructure.
 Only runs when RUN_INTEGRATION_TESTS environment variable is set.
+
+Rate Limiting Handling:
+- Uses get_relay_wait_time() to apply 3x longer waits for public relays
+- Implements exponential backoff and retry logic for heavily rate-limited operations
+- Adds delays between test classes and methods to space out relay operations
+- Uses longer timeouts for public relay operations vs local services
 """
 
 import asyncio
@@ -150,6 +156,10 @@ class TestWalletMinting:
     """Test wallet minting operations that require mint API."""
 
     async def test_mint_async_flow(self, wallet):
+        # Add delay between test classes for public relays
+        if not os.getenv("USE_LOCAL_SERVICES"):
+            print("Adding delay between test classes to avoid rate limiting...")
+            await asyncio.sleep(15.0)  # 15 second delay for public relays
         """Test asynchronous minting flow with auto-paying test mint."""
         # Create invoice - test mint should auto-pay
         invoice, task = await wallet.mint_async(25)
@@ -166,16 +176,19 @@ class TestWalletMinting:
             await asyncio.sleep(get_relay_wait_time(2.0))
 
             # Verify balance increased with retry for rate limiting
-            max_balance_retries = 3
+            max_balance_retries = 8  # More retries for heavily rate-limited tests
+            base_delay = get_relay_wait_time(2.0)
             for attempt in range(max_balance_retries):
                 balance = await wallet.get_balance()
                 if balance >= 25:
                     break
                 if attempt < max_balance_retries - 1:
+                    # Exponential backoff for heavy rate limiting
+                    delay = base_delay * (1.5**attempt)
                     print(
-                        f"Balance check attempt {attempt + 1}: {balance} sats, retrying..."
+                        f"Balance check attempt {attempt + 1}: {balance} sats, retrying in {delay:.1f}s..."
                     )
-                    await asyncio.sleep(get_relay_wait_time(2.0))
+                    await asyncio.sleep(delay)
 
             assert balance >= 25, (
                 f"Balance should be at least 25 sats, got {balance} after {max_balance_retries} attempts"
@@ -197,6 +210,10 @@ class TestWalletTransactions:
     """Test wallet transaction operations that require mint validation."""
 
     async def test_send_insufficient_balance(self, wallet):
+        # Add delay between test classes for public relays
+        if not os.getenv("USE_LOCAL_SERVICES"):
+            print("Adding delay between test classes to avoid rate limiting...")
+            await asyncio.sleep(15.0)  # 15 second delay for public relays
         """Test send with insufficient balance (should fail gracefully)."""
         # Empty wallet should fail to send
         with pytest.raises(Exception) as exc_info:
