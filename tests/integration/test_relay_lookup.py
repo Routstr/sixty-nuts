@@ -121,13 +121,13 @@ async def test_event_manager(test_relay_manager, test_privkey, test_mint_urls):
 class TestBasicRelayOperations:
     """Test basic relay connectivity and operations."""
 
-    async def test_relay_connection(self, test_relay):
+    async def test_relay_connection(self, test_relay) -> None:
         """Test basic relay connection."""
         # Relay should be connected from fixture
         assert test_relay.ws is not None
         assert test_relay.ws.close_code is None
 
-    async def test_relay_reconnection(self):
+    async def test_relay_reconnection(self) -> None:
         """Test relay reconnection after disconnect."""
         relay = NostrRelay(TEST_RELAYS[0])
 
@@ -145,7 +145,7 @@ class TestBasicRelayOperations:
 
         await relay.disconnect()
 
-    async def test_relay_timeout_handling(self):
+    async def test_relay_timeout_handling(self) -> None:
         """Test relay timeout handling."""
         # Use a non-existent relay to test timeout
         relay = NostrRelay("wss://nonexistent.relay.example.com")
@@ -153,7 +153,7 @@ class TestBasicRelayOperations:
         with pytest.raises(Exception):  # Should raise RelayError or timeout
             await relay.connect()
 
-    async def test_fetch_events_basic(self, test_relay):
+    async def test_fetch_events_basic(self, test_relay) -> None:
         """Test fetching events with basic filters."""
         # Fetch recent events from relay
         filters: list[NostrFilter] = [
@@ -169,7 +169,7 @@ class TestBasicRelayOperations:
         assert isinstance(events, list)
         # Note: Can't assert len > 0 as relay might be empty or filtered
 
-    async def test_fetch_events_with_timeout(self, test_relay):
+    async def test_fetch_events_with_timeout(self, test_relay) -> None:
         """Test event fetching with short timeout."""
         filters: list[NostrFilter] = [
             {
@@ -192,7 +192,7 @@ class TestEventPublishing:
 
     async def test_publish_and_fetch_text_note(
         self, test_relay, test_privkey, test_pubkey
-    ):
+    ) -> None:
         """Test publishing a text note and fetching it back."""
         # Create a unique text note
         unique_content = f"Test note {uuid4().hex[:8]} at {int(time.time())}"
@@ -244,7 +244,7 @@ class TestEventPublishing:
 
     async def test_publish_wallet_metadata_event(
         self, test_relay, test_privkey, test_pubkey
-    ):
+    ) -> None:
         """Test publishing a wallet metadata event (kind 17375)."""
         # Create wallet metadata content
         content_data = [
@@ -301,7 +301,9 @@ class TestEventPublishing:
         assert decrypted_data == content_data
         assert found_event["kind"] == EventKind.Wallet
 
-    async def test_publish_delete_event(self, test_relay, test_privkey, test_pubkey):
+    async def test_publish_delete_event(
+        self, test_relay, test_privkey, test_pubkey
+    ) -> None:
         """Test publishing and then deleting an event."""
         # First, publish a test event
         test_content = f"Test event to delete {uuid4().hex[:8]}"
@@ -353,7 +355,7 @@ class TestEventPublishing:
                 }
             ]
 
-            events = await test_relay.fetch_events(filters, timeout=5.0)
+            await test_relay.fetch_events(filters, timeout=5.0)
 
             # Check if original event is still present
             # Note: Not all relays implement deletion, so we just verify the delete was accepted
@@ -363,7 +365,9 @@ class TestEventPublishing:
 class TestQueuedRelayOperations:
     """Test queued relay operations."""
 
-    async def test_queued_event_publishing(self, test_queued_relay, test_privkey):
+    async def test_queued_event_publishing(
+        self, test_queued_relay, test_privkey
+    ) -> None:
         """Test publishing events through the queue system."""
         # Create multiple test events
         events_to_publish = []
@@ -385,7 +389,10 @@ class TestQueuedRelayOperations:
 
             # Use callback to track completion
             completion_event = asyncio.Event()
-            publish_result = {"success": False, "error": None}
+            publish_result: dict[str, bool | str | None] = {
+                "success": False,
+                "error": None,
+            }
 
             def callback(success: bool, error: str | None) -> None:
                 publish_result["success"] = success
@@ -423,7 +430,7 @@ class TestQueuedRelayOperations:
         if len(successful_events) == 0:
             pytest.skip("All events were rejected by relay (possible rate limiting)")
 
-    async def test_queue_processor_lifecycle(self):
+    async def test_queue_processor_lifecycle(self) -> None:
         """Test starting and stopping the queue processor."""
         relay = QueuedNostrRelay(TEST_RELAYS[0], batch_size=2, batch_interval=0.5)
 
@@ -442,7 +449,9 @@ class TestQueuedRelayOperations:
         finally:
             await relay.disconnect()
 
-    async def test_pending_proofs_tracking(self, test_queued_relay, test_privkey):
+    async def test_pending_proofs_tracking(
+        self, test_queued_relay, test_privkey
+    ) -> None:
         """Test tracking of pending token events for proof data."""
         # Create a token event with proof data
         proof_data = {
@@ -493,7 +502,7 @@ class TestQueuedRelayOperations:
 class TestRelayPoolOperations:
     """Test relay pool functionality."""
 
-    async def test_relay_pool_creation_and_connection(self, test_privkey):
+    async def test_relay_pool_creation_and_connection(self, test_privkey) -> None:
         """Test creating and connecting a relay pool."""
         pool = RelayPool(
             urls=TEST_RELAYS[:2],
@@ -529,7 +538,7 @@ class TestRelayPoolOperations:
 class TestRelayManagerOperations:
     """Test relay manager functionality."""
 
-    async def test_relay_manager_initialization(self, test_relay_manager):
+    async def test_relay_manager_initialization(self, test_relay_manager) -> None:
         """Test relay manager initialization and connection."""
         # Get relay connections (should trigger discovery/connection)
         relays = await test_relay_manager.get_relay_connections()
@@ -537,7 +546,7 @@ class TestRelayManagerOperations:
         assert len(relays) > 0, "Should connect to at least one relay"
         assert test_relay_manager.relay_pool is not None
 
-    async def test_publish_to_relays(self, test_relay_manager, test_privkey):
+    async def test_publish_to_relays(self, test_relay_manager, test_privkey) -> None:
         """Test publishing events through relay manager."""
         # Create test event
         unsigned_event = create_event(
@@ -551,14 +560,14 @@ class TestRelayManagerOperations:
 
         assert len(event_id) > 0, "Should return valid event ID"
 
-    async def test_fetch_wallet_events(self, test_relay_manager, test_pubkey):
+    async def test_fetch_wallet_events(self, test_relay_manager, test_pubkey) -> None:
         """Test fetching wallet events through relay manager."""
         events = await test_relay_manager.fetch_wallet_events(test_pubkey)
 
         assert isinstance(events, list)
         # Events list might be empty for fresh pubkey
 
-    async def test_relay_discovery(self, test_privkey):
+    async def test_relay_discovery(self, test_privkey) -> None:
         """Test relay discovery from kind:10019 events."""
         manager = RelayManager(
             relay_urls=TEST_RELAYS[:1],
@@ -580,7 +589,7 @@ class TestRelayManagerOperations:
 class TestEventManagerOperations:
     """Test event manager functionality."""
 
-    async def test_wallet_event_creation(self, test_event_manager):
+    async def test_wallet_event_creation(self, test_event_manager) -> None:
         """Test creating wallet events through event manager."""
         wallet_privkey_hex = generate_privkey()
 
@@ -615,7 +624,7 @@ class TestEventManagerOperations:
                 # Re-raise if it's not a rate limiting error
                 raise
 
-    async def test_token_event_publishing(self, test_event_manager):
+    async def test_token_event_publishing(self, test_event_manager) -> None:
         """Test publishing token events through event manager."""
         # Create test proofs
         test_proofs: list[ProofDict] = [
@@ -646,7 +655,7 @@ class TestEventManagerOperations:
             else:
                 raise
 
-    async def test_spending_history_publishing(self, test_event_manager):
+    async def test_spending_history_publishing(self, test_event_manager) -> None:
         """Test publishing spending history events."""
         # Publish history event
         try:
@@ -685,7 +694,7 @@ class TestEventManagerOperations:
             else:
                 raise
 
-    async def test_nip60_proof_conversion(self, test_event_manager):
+    async def test_nip60_proof_conversion(self, test_event_manager) -> None:
         """Test NIP-60 proof format conversion."""
         # Test proof with hex secret
         hex_proof: ProofDict = {
@@ -708,7 +717,7 @@ class TestEventManagerOperations:
         # Should match original
         assert internal_proof["secret"] == hex_proof["secret"]
 
-    async def test_event_count_operations(self, test_event_manager):
+    async def test_event_count_operations(self, test_event_manager) -> None:
         """Test counting various event types."""
         # Count token events
         token_count = await test_event_manager.count_token_events()
@@ -748,7 +757,7 @@ class TestEventManagerOperations:
 class TestRelayErrorHandling:
     """Test error handling in relay operations."""
 
-    async def test_connection_error_handling(self):
+    async def test_connection_error_handling(self) -> None:
         """Test handling of connection errors."""
         # Try to connect to non-existent relay
         relay = NostrRelay("wss://nonexistent.relay.nowhere")
@@ -756,7 +765,7 @@ class TestRelayErrorHandling:
         with pytest.raises(Exception):
             await relay.connect()
 
-    async def test_invalid_event_publishing(self, test_relay):
+    async def test_invalid_event_publishing(self, test_relay) -> None:
         """Test publishing invalid events."""
         # Create invalid event (missing required fields)
         invalid_event = {
@@ -770,7 +779,7 @@ class TestRelayErrorHandling:
         result = await test_relay.publish_event(invalid_event)  # type: ignore
         assert result is False, "Invalid event should be rejected by relay"
 
-    async def test_timeout_handling(self, test_relay):
+    async def test_timeout_handling(self, test_relay) -> None:
         """Test timeout handling in fetch operations."""
         # Use very short timeout
         filters: list[NostrFilter] = [
@@ -798,7 +807,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Run a simple test
-    async def main():
+    async def main() -> None:
         print("Running basic relay integration test...")
 
         # Test basic connection

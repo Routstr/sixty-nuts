@@ -19,6 +19,22 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def get_relay_wait_time(base_seconds: float = 2.0) -> float:
+    """Get appropriate wait time based on service type.
+
+    Args:
+        base_seconds: Base wait time for local services
+
+    Returns:
+        Wait time in seconds (longer for public relays due to rate limiting)
+    """
+    if os.getenv("USE_LOCAL_SERVICES"):
+        return base_seconds
+    else:
+        # Public relays need longer waits due to rate limiting
+        return base_seconds * 3.0  # 3x longer for public relays
+
+
 @pytest.fixture
 def test_nsec():
     """Generate a test nostr private key."""
@@ -99,13 +115,13 @@ class TestWalletBasicOperations:
         assert initialized is True
 
         # Give some time for the wallet event to propagate
-        await asyncio.sleep(2)
+        await asyncio.sleep(get_relay_wait_time(2.0))
 
         # Check wallet event exists (requires relay connection)
         exists, event = await wallet.check_wallet_event_exists()
         if not exists:
             # Try one more time in case of relay timing issues
-            await asyncio.sleep(3)
+            await asyncio.sleep(get_relay_wait_time(3.0))
             exists, event = await wallet.check_wallet_event_exists()
 
         assert exists is True, "Wallet event should exist after initialization"
@@ -141,16 +157,29 @@ class TestWalletMinting:
 
         # Wait for the auto-payment to complete
         try:
-            # Give reasonable time for auto-payment
-            paid = await asyncio.wait_for(task, timeout=30.0)
+            # Give reasonable time for auto-payment (longer for public relays)
+            timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+            paid = await asyncio.wait_for(task, timeout=timeout)
             assert paid is True, "Invoice should be auto-paid by test mint"
 
             # Give time for token events to propagate to relay
-            await asyncio.sleep(2)
+            await asyncio.sleep(get_relay_wait_time(2.0))
 
-            # Verify balance increased
-            balance = await wallet.get_balance()
-            assert balance >= 25, f"Balance should be at least 25 sats, got {balance}"
+            # Verify balance increased with retry for rate limiting
+            max_balance_retries = 3
+            for attempt in range(max_balance_retries):
+                balance = await wallet.get_balance()
+                if balance >= 25:
+                    break
+                if attempt < max_balance_retries - 1:
+                    print(
+                        f"Balance check attempt {attempt + 1}: {balance} sats, retrying..."
+                    )
+                    await asyncio.sleep(get_relay_wait_time(2.0))
+
+            assert balance >= 25, (
+                f"Balance should be at least 25 sats, got {balance} after {max_balance_retries} attempts"
+            )
 
         except asyncio.TimeoutError:
             # If timeout, cancel the task and fail
@@ -190,17 +219,30 @@ class TestWalletTransactions:
         invoice, task = await wallet.mint_async(mint_amount)
         print(f"Created invoice for {mint_amount} sats: {invoice}")
 
-        # Wait for auto-payment
-        paid = await asyncio.wait_for(task, timeout=30.0)
+        # Wait for auto-payment (longer timeout for public relays)
+        timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+        paid = await asyncio.wait_for(task, timeout=timeout)
         assert paid is True, "Invoice should be auto-paid by test mint"
 
         # Give time for token events to propagate to relay
-        await asyncio.sleep(2)
+        await asyncio.sleep(get_relay_wait_time(2.0))
 
-        # Verify wallet is funded
-        funded_balance = await wallet.get_balance()
+        # Verify wallet is funded with retry for rate limiting
+        max_funded_retries = 5  # More retries for the main test
+        for attempt in range(max_funded_retries):
+            funded_balance = await wallet.get_balance()
+            if funded_balance >= mint_amount:
+                break
+            if attempt < max_funded_retries - 1:
+                print(
+                    f"Funded balance check attempt {attempt + 1}: {funded_balance} sats, retrying..."
+                )
+                await asyncio.sleep(
+                    get_relay_wait_time(3.0)
+                )  # Longer wait between retries
+
         assert funded_balance >= mint_amount, (
-            f"Expected at least {mint_amount}, got {funded_balance}"
+            f"Expected at least {mint_amount}, got {funded_balance} after {max_funded_retries} attempts"
         )
         print(f"Wallet funded with {funded_balance} sats")
 
@@ -219,7 +261,9 @@ class TestWalletTransactions:
         print(f"\nCreated token for {send_amount} sats")
 
         # Check balance after send
-        await asyncio.sleep(2)  # Give time for events to propagate
+        await asyncio.sleep(
+            get_relay_wait_time(2.0)
+        )  # Give time for events to propagate
         state = await wallet.fetch_wallet_state()
         balance_after_send = state.balance
         print(
@@ -239,7 +283,7 @@ class TestWalletTransactions:
         )
 
         # Give time for events to propagate
-        await asyncio.sleep(2)
+        await asyncio.sleep(get_relay_wait_time(2.0))
 
         # 5. Verify final balance (accounting for fees)
         state = await wallet.fetch_wallet_state()
@@ -273,17 +317,39 @@ class TestWalletTransactions:
 
     async def test_multiple_send_operations(self, wallet):
         """Test multiple send operations to verify fee handling."""
+        # Add delay for public relays to avoid consecutive test rate limiting
+        if not os.getenv("USE_LOCAL_SERVICES"):
+            print("Adding delay to avoid rate limiting from previous test...")
+            await asyncio.sleep(10.0)  # 10 second delay for public relays
+
         # Fund wallet
         mint_amount = 200
         invoice, task = await wallet.mint_async(mint_amount)
-        paid = await asyncio.wait_for(task, timeout=30.0)
+        timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+        paid = await asyncio.wait_for(task, timeout=timeout)
         assert paid is True
 
         # Give time for token events to propagate to relay
-        await asyncio.sleep(2)
+        await asyncio.sleep(get_relay_wait_time(2.0))
 
-        initial_balance = await wallet.get_balance()
-        assert initial_balance >= mint_amount
+        # Check initial balance with retry for rate limiting (more aggressive for consecutive tests)
+        max_initial_retries = 8  # More retries for rate-limited consecutive tests
+        base_delay = get_relay_wait_time(3.0)
+        for attempt in range(max_initial_retries):
+            initial_balance = await wallet.get_balance()
+            if initial_balance >= mint_amount:
+                break
+            if attempt < max_initial_retries - 1:
+                # Exponential backoff for heavy rate limiting
+                delay = base_delay * (1.5**attempt)
+                print(
+                    f"Initial balance check attempt {attempt + 1}: {initial_balance} sats, retrying in {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+
+        assert initial_balance >= mint_amount, (
+            f"Expected at least {mint_amount}, got {initial_balance} after {max_initial_retries} attempts"
+        )
 
         # Perform a few small sends
         send_amounts = [10, 5, 20, 1]
@@ -297,7 +363,7 @@ class TestWalletTransactions:
                 tokens.append((amount, token))
 
                 # Give time for events to propagate
-                await asyncio.sleep(1)
+                await asyncio.sleep(get_relay_wait_time(1.0))
 
                 balance_after = await wallet.get_balance()
                 print(f"Balance: {balance_before} → {balance_after} (sent {amount})")
@@ -387,11 +453,21 @@ class TestWalletMintIntegration:
         keysets = keysets_resp["keysets"]
         assert len(keysets) > 0, "Mint should have at least one keyset"
 
-        # Verify keyset structure
-        for keyset in keysets:
+        # Find keysets for our wallet's currency
+        wallet_currency_keysets = [
+            ks
+            for ks in keysets
+            if ks.get("unit") == wallet.currency and ks.get("active", True)
+        ]
+        assert len(wallet_currency_keysets) > 0, (
+            f"Mint should have active keysets for {wallet.currency}"
+        )
+
+        # Verify keyset structure for our currency
+        for keyset in wallet_currency_keysets:
             assert "id" in keyset
             assert "unit" in keyset
-            assert keyset["unit"] == "sat"  # Test mint uses sats
+            assert keyset["unit"] == wallet.currency  # Should match wallet's currency
 
     async def test_get_keys_from_mint(self, wallet):
         """Test getting public keys from real mint."""
