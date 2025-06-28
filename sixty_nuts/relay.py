@@ -22,7 +22,6 @@ RELAYS_ENV_VAR = "RELAYS"
 # Recommended public relays for users
 RECOMMENDED_RELAYS = [
     "wss://relay.damus.io",
-    "wss://relay.primal.net",
     "wss://relay.snort.social",
     "wss://relay.nostr.band",
 ]

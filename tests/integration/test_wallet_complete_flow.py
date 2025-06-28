@@ -72,7 +72,6 @@ def test_relays():
     else:
         return [
             "wss://relay.damus.io",
-            "wss://relay.primal.net",
             "wss://relay.nostr.band",
         ]
 
@@ -580,7 +579,6 @@ if __name__ == "__main__":
             mint_urls = ["https://testnut.cashu.space"]
             relays = [
                 "wss://relay.damus.io",
-                "wss://relay.primal.net",
                 "wss://relay.nostr.band",
             ]
 
