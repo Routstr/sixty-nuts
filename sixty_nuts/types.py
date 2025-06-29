@@ -15,7 +15,7 @@ class ProofDict(TypedDict):
     amount: int
     secret: str
     C: str
-    mint: str | None  # Add mint URL tracking
+    mint: str
 
 
 class WalletError(Exception):
