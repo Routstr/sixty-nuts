@@ -917,7 +917,8 @@ class Wallet:
         Returns dict of denomination -> count.
         """
         denominations = {}
-        remaining = amount
+        # Ensure we're working with an integer
+        remaining = int(amount)
 
         # Use powers of 2 for optimal denomination
         for denom in [
@@ -939,7 +940,7 @@ class Wallet:
         ]:
             if remaining >= denom:
                 count = remaining // denom
-                denominations[denom] = count
+                denominations[denom] = int(count)  # Ensure count is always int
                 remaining -= denom * count
 
         return denominations
@@ -994,7 +995,7 @@ class Wallet:
             if selected_total >= amount:
                 break
             selected_input_proofs.append(proof)
-            selected_total += proof["amount"]
+            selected_total += int(proof["amount"])  # Ensure integer arithmetic
 
         if selected_total < amount:
             raise WalletError(
@@ -1013,11 +1014,11 @@ class Wallet:
         # Adjust target denominations to account for fees
         # The equation is: inputs - fees = outputs
         # So: outputs = inputs - fees = selected_total - input_fees
-        output_amount = selected_total - input_fees
+        output_amount = int(selected_total - input_fees)
 
         # Recalculate denominations for the actual output amount
         send_denoms = self._calculate_optimal_denominations(amount)
-        change_amount = output_amount - amount
+        change_amount = int(output_amount - amount)  # Ensure integer
 
         if change_amount < 0:
             raise WalletError(
