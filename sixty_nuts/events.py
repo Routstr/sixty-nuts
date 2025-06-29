@@ -369,6 +369,7 @@ class EventManager:
             tags=tags,
         )
 
+        # TODO: make this async in background
         return await self.relay_manager.publish_to_relays(event)
 
     async def clear_spending_history(self) -> int:
@@ -540,6 +541,7 @@ class EventManager:
         nip60_proofs = [self._convert_proof_to_nip60(p) for p in proofs]
 
         # Get mint URL from proofs or use default
+        mint_url: str | None = None
         if nip60_proofs and nip60_proofs[0].get("mint"):
             mint_url = nip60_proofs[0]["mint"]
         else:
