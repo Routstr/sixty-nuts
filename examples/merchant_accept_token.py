@@ -30,7 +30,7 @@ async def accept_token(wallet: Wallet, token: str, auto_swap: bool = True):
         print(f"   Trusted Mint: {'✅ Yes' if is_trusted_mint else '❌ No'}")
 
         if not is_trusted_mint and auto_swap:
-            print(f"\n🔄 Will auto-swap to trusted mint: {wallet.mint_urls[0]}")
+            print(f"\n🔄 Will auto-swap to trusted mint: {wallet._primary_mint_url()}")
 
         # Get balance before
         balance_before = await wallet.get_balance()

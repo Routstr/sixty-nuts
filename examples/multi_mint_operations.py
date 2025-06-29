@@ -48,7 +48,7 @@ async def add_new_mint(wallet: Wallet, mint_url: str):
     print(f"\n➕ Adding new mint: {mint_url}")
 
     if mint_url not in wallet.mint_urls:
-        wallet.mint_urls.append(mint_url)
+        wallet.mint_urls.add(mint_url)
 
         # Update wallet event with new mint
         try:

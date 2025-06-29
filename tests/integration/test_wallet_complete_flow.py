@@ -462,7 +462,7 @@ class TestWalletMintIntegration:
 
     async def test_get_keysets_from_mint(self, wallet):
         """Test getting keysets from real mint."""
-        mint = wallet._get_mint(wallet.mint_urls[0])
+        mint = wallet._get_mint(wallet._primary_mint_url())
         keysets_resp = await mint.get_keysets()
 
         assert "keysets" in keysets_resp
@@ -487,7 +487,7 @@ class TestWalletMintIntegration:
 
     async def test_get_keys_from_mint(self, wallet):
         """Test getting public keys from real mint."""
-        mint = wallet._get_mint(wallet.mint_urls[0])
+        mint = wallet._get_mint(wallet._primary_mint_url())
 
         # Get keysets first
         keysets_resp = await mint.get_keysets()
@@ -515,7 +515,7 @@ class TestWalletProofValidation:
 
     async def test_proof_state_checking_empty(self, wallet):
         """Test proof state checking with empty proofs list."""
-        mint = wallet._get_mint(wallet.mint_urls[0])
+        mint = wallet._get_mint(wallet._primary_mint_url())
 
         # Empty Y values should return empty states
         state_response = await mint.check_state(Ys=[])

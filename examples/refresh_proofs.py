@@ -20,17 +20,9 @@ async def refresh_proofs(wallet: Wallet):
 
     print(f"Found {len(state.proofs)} proofs worth {state.balance} sats")
 
-    # Group proofs by mint
-    proofs_by_mint: dict[str, list] = {}
-    for proof in state.proofs:
-        mint_url = proof.get("mint") or wallet.mint_urls[0]
-        if mint_url not in proofs_by_mint:
-            proofs_by_mint[mint_url] = []
-        proofs_by_mint[mint_url].append(proof)
+    print(f"Refreshing proofs at {len(state.proofs_by_mints)} mint(s)...")
 
-    print(f"Refreshing proofs at {len(proofs_by_mint)} mint(s)...")
-
-    for mint_url, mint_proofs in proofs_by_mint.items():
+    for mint_url, mint_proofs in state.proofs_by_mints.items():
         mint_balance = sum(p["amount"] for p in mint_proofs)
         print(f"\n📍 Processing {len(mint_proofs)} proofs at {mint_url}")
         print(f"   Balance: {mint_balance} sats")
