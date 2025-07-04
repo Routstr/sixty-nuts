@@ -10,8 +10,6 @@ import os
 import pytest
 from collections import defaultdict
 
-from sixty_nuts.wallet import Wallet
-from sixty_nuts.crypto import generate_privkey
 
 
 # Skip all integration tests unless explicitly enabled
@@ -29,47 +27,8 @@ def get_relay_wait_time(base_seconds: float = 1.0) -> float:
         return base_seconds * 9.0  # 9x longer for public relays
 
 
-@pytest.fixture
-def test_nsec():
-    """Generate a test nostr private key."""
-    return generate_privkey()
-
-
-@pytest.fixture
-def test_mint_urls():
-    """Test mint URLs for integration tests."""
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return ["http://localhost:3338"]
-    else:
-        return ["https://testnut.cashu.space"]
-
-
-@pytest.fixture
-def test_relays():
-    """Test relay URLs for integration tests."""
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return ["ws://localhost:8080"]
-    else:
-        return [
-            "wss://relay.damus.io",
-            "wss://relay.nostr.band",
-        ]
-
-
-@pytest.fixture
-async def wallet(test_nsec, test_mint_urls, test_relays):
-    """Create a test wallet instance."""
-    wallet = await Wallet.create(
-        nsec=test_nsec,
-        mint_urls=test_mint_urls,
-        currency="sat",
-        relays=test_relays,
-        auto_init=False,
-    )
-
-    await wallet.initialize_wallet(force=True)
-    yield wallet
-    await wallet.aclose()
+# Fixtures are imported from conftest.py automatically
+# No need to redefine test_nsec, test_mint_urls, test_relays, wallet
 
 
 class TestAdvancedWalletOperations:

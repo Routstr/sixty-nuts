@@ -16,9 +16,9 @@ import pytest
 
 from sixty_nuts.wallet import Wallet
 from sixty_nuts.crypto import generate_privkey
+from sixty_nuts.types import ProofDict
 
 
-# Skip all integration tests unless explicitly enabled
 pytestmark = pytest.mark.skipif(
     not os.getenv("RUN_INTEGRATION_TESTS"),
     reason="Integration tests only run when RUN_INTEGRATION_TESTS is set",
@@ -26,90 +26,19 @@ pytestmark = pytest.mark.skipif(
 
 
 def get_relay_wait_time(base_seconds: float = 2.0) -> float:
-    """Get appropriate wait time based on service type.
-
-    Args:
-        base_seconds: Base wait time for local services
-
-    Returns:
-        Wait time in seconds (longer for public relays due to rate limiting)
-    """
+    """Get appropriate wait time based on service type."""
     if os.getenv("USE_LOCAL_SERVICES"):
         return base_seconds
     else:
-        # Public relays need longer waits due to rate limiting
         return base_seconds * 3.0  # 3x longer for public relays
-
-
-@pytest.fixture
-def test_nsec():
-    """Generate a test nostr private key."""
-    return generate_privkey()
-
-
-@pytest.fixture
-def test_mint_urls():
-    """Test mint URLs for integration tests.
-
-    Uses local Docker mint when USE_LOCAL_SERVICES is set,
-    otherwise uses public test mint.
-    """
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return ["http://localhost:3338"]
-    else:
-        return ["https://testnut.cashu.space"]
-
-
-@pytest.fixture
-def test_relays():
-    """Test relay URLs for integration tests.
-
-    Uses local Docker relay when USE_LOCAL_SERVICES is set,
-    otherwise uses public relays.
-    """
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return ["ws://localhost:8080"]
-    else:
-        return [
-            "wss://relay.damus.io",
-            "wss://relay.nostr.band",
-        ]
-
-
-@pytest.fixture
-async def wallet(test_nsec, test_mint_urls, test_relays):
-    """Create a test wallet instance."""
-    wallet = await Wallet.create(
-        nsec=test_nsec,
-        mint_urls=test_mint_urls,
-        currency="sat",
-        relays=test_relays,
-        auto_init=False,  # Don't auto-initialize to avoid conflicts
-    )
-
-    # Initialize wallet explicitly
-    await wallet.initialize_wallet(force=True)
-
-    yield wallet
-
-    # Cleanup
-    await wallet.aclose()
 
 
 class TestWalletBasicOperations:
     """Test basic wallet operations that require live services."""
 
-    async def test_wallet_creation_and_initialization(
-        self, test_nsec, test_mint_urls, test_relays
-    ):
+    async def test_wallet_creation_and_initialization(self, clean_wallet):
         """Test wallet creation and initialization with live relay connections."""
-        wallet = await Wallet.create(
-            nsec=test_nsec,
-            mint_urls=test_mint_urls,
-            currency="sat",
-            relays=test_relays,
-            auto_init=False,
-        )
+        wallet = clean_wallet
 
         # Check initial state
         balance = await wallet.get_balance(check_proofs=False)
@@ -132,16 +61,15 @@ class TestWalletBasicOperations:
         assert exists is True, "Wallet event should exist after initialization"
         assert event is not None
 
-        await wallet.aclose()
-
     async def test_balance_check_empty_wallet(self, wallet):
         """Test balance checking on empty wallet."""
         balance = await wallet.get_balance()
         assert balance == 0
 
-    async def test_mint_quote_creation(self, wallet):
+    async def test_mint_quote_creation(self, wallet: Wallet) -> None:
         """Test creating mint quotes (requires mint API)."""
-        invoice, quote_id = await wallet.create_quote(50)
+        mint_url = wallet._primary_mint_url()
+        invoice, quote_id = await wallet.create_quote(50, mint_url)
 
         assert invoice.startswith("lnbc")  # BOLT11 invoice
         assert len(quote_id) > 0
@@ -155,11 +83,12 @@ class TestWalletMinting:
     """Test wallet minting operations that require mint API."""
 
     async def test_mint_async_flow(self, wallet):
+        """Test asynchronous minting flow with auto-paying test mint."""
         # Add delay between test classes for public relays
         if not os.getenv("USE_LOCAL_SERVICES"):
             print("Adding delay between test classes to avoid rate limiting...")
             await asyncio.sleep(15.0)  # 15 second delay for public relays
-        """Test asynchronous minting flow with auto-paying test mint."""
+
         # Create invoice - test mint should auto-pay
         invoice, task = await wallet.mint_async(25)
         print(f"Created invoice: {invoice}")
@@ -167,7 +96,9 @@ class TestWalletMinting:
         # Wait for the auto-payment to complete
         try:
             # Give reasonable time for auto-payment (longer for public relays)
-            timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+            timeout = (
+                30.0 if os.getenv("USE_LOCAL_SERVICES") else 90.0
+            )  # Increased from 60s
             paid = await asyncio.wait_for(task, timeout=timeout)
             assert paid is True, "Invoice should be auto-paid by test mint"
 
@@ -236,7 +167,9 @@ class TestWalletTransactions:
         print(f"Created invoice for {mint_amount} sats: {invoice}")
 
         # Wait for auto-payment (longer timeout for public relays)
-        timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+        timeout = (
+            30.0 if os.getenv("USE_LOCAL_SERVICES") else 90.0
+        )  # Increased from 60s
         paid = await asyncio.wait_for(task, timeout=timeout)
         assert paid is True, "Invoice should be auto-paid by test mint"
 
@@ -524,7 +457,6 @@ class TestWalletProofValidation:
 
     async def test_compute_proof_y_values(self, wallet):
         """Test Y value computation for proof validation."""
-        from sixty_nuts.types import ProofDict
 
         mock_proofs = [
             ProofDict(
