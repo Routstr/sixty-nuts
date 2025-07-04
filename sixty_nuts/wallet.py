@@ -1214,7 +1214,9 @@ class Wallet:
             return
 
         # 1. Get current state to find which events contain spent proofs
-        state = await self.fetch_wallet_state(check_proofs=False)
+        state = await self.fetch_wallet_state(
+            check_proofs=False, check_local_backups=False
+        )
 
         if not state.proof_to_event_id:
             # No mapping available, nothing to rollover
@@ -1314,7 +1316,7 @@ class Wallet:
         if not proofs:
             return  # Nothing to store
 
-        backup_dir = Path.home() / ".cashu_nip60" / "proof_backups"
+        backup_dir = Path.cwd() / "proof_backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(time.time())
@@ -1333,7 +1335,9 @@ class Wallet:
             print(f"Warning: Failed to create local backup: {e}")
 
         # Check which proofs are already stored
-        state = await self.fetch_wallet_state(check_proofs=False)
+        state = await self.fetch_wallet_state(
+            check_proofs=False, check_local_backups=False
+        )
         existing_proofs = set()
 
         for proof in state.proofs:
@@ -1348,18 +1352,22 @@ class Wallet:
                 new_proofs.append(proof)
 
         if not new_proofs:
-            # All proofs already stored
-            try:
-                os.remove(backup_file)  # Clean up backup
-            except Exception:
-                pass
             return
+
+        # Group new proofs by mint
+        new_proofs_by_mint: dict[str, list[ProofDict]] = {}
+        for proof in new_proofs:
+            mint_url = proof.get("mint", "")
+            if mint_url:
+                if mint_url not in new_proofs_by_mint:
+                    new_proofs_by_mint[mint_url] = []
+                new_proofs_by_mint[mint_url].append(proof)
 
         # Publish token events for each mint
         published_count = 0
         failed_mints = []
 
-        for mint_url, mint_proofs in state.proofs_by_mints.items():
+        for mint_url, mint_proofs in new_proofs_by_mint.items():
             try:
                 # Publish token event
                 event_manager = await self._ensure_event_manager()
@@ -1399,14 +1407,8 @@ class Wallet:
                     self._retry_store_proofs(mint_proofs, mint_url, backup_file)
                 )
 
-        # Clean up backup if all succeeded
-        if not failed_mints and published_count == len(new_proofs):
-            try:
-                os.remove(backup_file)
-            except Exception:
-                pass
-        else:
-            print(f"⚠️  Kept local backup at: {backup_file}")
+        if published_count > 0:
+            print(f"✅ Published {published_count} new proofs to Nostr")
 
         if failed_mints:
             print(f"⚠️  Failed to publish proofs for mints: {', '.join(failed_mints)}")
@@ -1451,8 +1453,34 @@ class Wallet:
                             with open(backup_file, "w") as f:
                                 json.dump(backup_data, f, indent=2)
                         else:
-                            # All proofs stored, remove backup
-                            backup_file.unlink()
+                            # All proofs stored - verify one more time before deletion
+                            # Fetch state to ensure proofs are really on relays
+                            await asyncio.sleep(2.0)  # Give relays time to propagate
+                            try:
+                                state = await self.fetch_wallet_state(
+                                    check_proofs=False, check_local_backups=False
+                                )
+                                stored_proof_ids = set(
+                                    f"{p['secret']}:{p['C']}" for p in state.proofs
+                                )
+                                all_stored = all(
+                                    f"{p['secret']}:{p['C']}" in stored_proof_ids
+                                    for p in proofs
+                                )
+
+                                if all_stored:
+                                    backup_file.unlink()
+                                    print(
+                                        f"    🗑️  Verified and deleted backup: {backup_file.name}"
+                                    )
+                                else:
+                                    print(
+                                        f"    ⚠️  Keeping backup (verification failed): {backup_file.name}"
+                                    )
+                            except Exception as e:
+                                print(
+                                    f"    ⚠️  Keeping backup (verification error): {e}"
+                                )
                 except Exception:
                     pass  # Ignore backup cleanup errors
 
@@ -1747,7 +1775,7 @@ class Wallet:
 
     async def summon_mint_with_balance(self, amount: int) -> str:
         """Summon a mint with at least the given amount of balance."""
-        state = await self.fetch_wallet_state()
+        state = await self.fetch_wallet_state(check_proofs=True)
         total_balance = state.balance
         if total_balance * 0.99 < amount:
             raise WalletError(
@@ -2042,11 +2070,14 @@ class Wallet:
 
         return valid_proofs
 
-    async def fetch_wallet_state(self, *, check_proofs: bool = True) -> WalletState:
+    async def fetch_wallet_state(
+        self, *, check_proofs: bool = True, check_local_backups: bool = True
+    ) -> WalletState:
         """Fetch wallet, token events and compute balance.
 
         Args:
             check_proofs: If True, validate all proofs with mint before returning state
+            check_local_backups: If True, scan local backups for missing proofs
         """
         # Clear spent proof cache to ensure fresh validation
         if check_proofs:
@@ -2257,6 +2288,83 @@ class Wallet:
             except Exception:
                 mint_keysets[mint_url] = []
 
+        # Check local backups for missing proofs if requested
+        if check_local_backups:
+            backup_dir = Path.cwd() / "proof_backups"
+            if backup_dir.exists() and any(backup_dir.glob("proofs_*.json")):
+                # Check if we've recently checked backups (within last 60 seconds)
+                last_check_file = backup_dir / ".last_check"
+                should_check = True
+
+                try:
+                    if last_check_file.exists():
+                        last_check_time = float(last_check_file.read_text().strip())
+                        if time.time() - last_check_time < 60:
+                            should_check = False
+                except Exception:
+                    pass
+
+                if not should_check:
+                    # Skip backup check if we just did it
+                    return WalletState(
+                        balance=balance,
+                        proofs=all_proofs,
+                        mint_keysets=mint_keysets,
+                        proof_to_event_id=proof_to_event_id,
+                    )
+                # Check if we have any backup files with missing proofs
+                existing_proof_ids = set(f"{p['secret']}:{p['C']}" for p in all_proofs)
+
+                # Quick scan to see if there might be missing proofs
+                has_missing = False
+                for backup_file in backup_dir.glob("proofs_*.json"):
+                    try:
+                        with open(backup_file, "r") as f:
+                            backup_data = json.load(f)
+                        backup_proofs = backup_data.get("proofs", [])
+
+                        for proof in backup_proofs:
+                            proof_id = f"{proof['secret']}:{proof['C']}"
+                            if proof_id not in existing_proof_ids:
+                                has_missing = True
+                                break
+                    except Exception:
+                        continue
+
+                    if has_missing:
+                        break
+
+                # If we found missing proofs, run the recovery scan
+                if has_missing:
+                    print("\n⚠️  Detected local proof backups not synced to Nostr")
+                    recovery_stats = await self.scan_and_recover_local_proofs(
+                        auto_publish=True
+                    )
+
+                    # Update last check timestamp
+                    try:
+                        last_check_file = backup_dir / ".last_check"
+                        last_check_file.write_text(str(time.time()))
+                    except Exception:
+                        pass
+
+                    # If we recovered proofs, re-fetch the state to include them
+                    if recovery_stats["recovered"] > 0:
+                        print("🔄 Re-fetching wallet state after recovery...")
+                        # Recursive call without check_local_backups to avoid infinite loop
+                        return await self.fetch_wallet_state(
+                            check_proofs=check_proofs, check_local_backups=False
+                        )
+                    elif (
+                        recovery_stats["missing_from_nostr"] > 0
+                        and recovery_stats["recovered"] == 0
+                    ):
+                        # All missing proofs were invalid/spent - clean up backup files
+                        print(
+                            "🧹 All proofs in backups are spent/invalid, cleaning up..."
+                        )
+                        await self._cleanup_spent_proof_backups()
+
         return WalletState(
             balance=balance,
             proofs=all_proofs,
@@ -2277,7 +2385,9 @@ class Wallet:
             balance = await wallet.get_balance()
             print(f"Balance: {balance} sats")
         """
-        state = await self.fetch_wallet_state(check_proofs=check_proofs)
+        state = await self.fetch_wallet_state(
+            check_proofs=check_proofs, check_local_backups=True
+        )
         return state.balance
 
     async def get_balance_by_mint(self, mint_url: str) -> int:
@@ -2565,7 +2675,9 @@ class Wallet:
         print("🧹 Starting wallet state cleanup...")
 
         # Get current state
-        state = await self.fetch_wallet_state(check_proofs=True)
+        state = await self.fetch_wallet_state(
+            check_proofs=True, check_local_backups=False
+        )
 
         # Fetch all events to analyze
         all_events = await self.relay_manager.fetch_wallet_events(
@@ -2703,3 +2815,260 @@ class Wallet:
             mint_url: [proof for proof in proofs if proof["mint"] == mint_url]
             for mint_url in set(proof["mint"] for proof in proofs)
         }
+
+    async def _cleanup_spent_proof_backups(self) -> int:
+        """Clean up backup files that only contain spent/invalid proofs.
+
+        Returns:
+            Number of backup files cleaned up
+        """
+        backup_dir = Path.cwd() / "proof_backups"
+        if not backup_dir.exists():
+            return 0
+
+        # Get current valid proofs and known spent proofs
+        state = await self.fetch_wallet_state(
+            check_proofs=False, check_local_backups=False
+        )
+        valid_proof_ids = set(f"{p['secret']}:{p['C']}" for p in state.proofs)
+
+        cleaned_count = 0
+        backup_files = list(backup_dir.glob("proofs_*.json"))
+
+        for backup_file in backup_files:
+            try:
+                with open(backup_file, "r") as f:
+                    backup_data = json.load(f)
+
+                backup_proofs = backup_data.get("proofs", [])
+                if not backup_proofs:
+                    # Empty backup file, remove it
+                    backup_file.unlink()
+                    cleaned_count += 1
+                    print(f"   🗑️  Deleted empty backup: {backup_file.name}")
+                    continue
+
+                # Check if all proofs are spent/invalid
+                all_invalid = True
+                for proof in backup_proofs:
+                    proof_id = f"{proof['secret']}:{proof['C']}"
+                    if proof_id in valid_proof_ids:
+                        # At least one valid proof, keep the backup
+                        all_invalid = False
+                        break
+
+                if all_invalid:
+                    # All proofs are spent/invalid, check with mint to be sure
+                    valid_proofs = await self._validate_proofs_with_cache(backup_proofs)
+                    if not valid_proofs:
+                        # Confirmed all proofs are spent/invalid
+                        backup_file.unlink()
+                        cleaned_count += 1
+                        print(
+                            f"   🗑️  Deleted backup with only spent proofs: {backup_file.name}"
+                        )
+
+            except Exception as e:
+                print(f"   ⚠️  Error processing backup {backup_file.name}: {e}")
+
+        return cleaned_count
+
+    async def scan_and_recover_local_proofs(
+        self, *, auto_publish: bool = False
+    ) -> dict[str, int]:
+        """Scan local proof backups and recover any missing from Nostr.
+
+        This method checks the local proof_backups directory for backup files
+        and compares them against what's stored on Nostr. Any missing proofs
+        can be automatically published to Nostr.
+
+        Args:
+            auto_publish: If True, automatically publish missing proofs to Nostr
+
+        Returns:
+            Dictionary with recovery statistics:
+            - total_backup_files: Number of backup files found
+            - total_proofs_in_backups: Total proofs across all backups
+            - missing_from_nostr: Number of proofs not found on Nostr
+            - recovered: Number of proofs successfully recovered
+            - failed: Number of proofs that failed to recover
+        """
+        stats = {
+            "total_backup_files": 0,
+            "total_proofs_in_backups": 0,
+            "missing_from_nostr": 0,
+            "recovered": 0,
+            "failed": 0,
+        }
+
+        backup_dir = Path.cwd() / "proof_backups"
+        if not backup_dir.exists():
+            return stats
+
+        print("🔍 Scanning local proof backups...")
+
+        try:
+            # Get current state from Nostr WITHOUT checking local backups to avoid recursion
+            state = await self.fetch_wallet_state(
+                check_proofs=False, check_local_backups=False
+            )
+            existing_proofs = set()
+            for proof in state.proofs:
+                proof_id = f"{proof['secret']}:{proof['C']}"
+                existing_proofs.add(proof_id)
+        except Exception as e:
+            print(f"❌ Error fetching wallet state: {e}")
+            return stats
+
+        # Scan all backup files
+        backup_files = list(backup_dir.glob("proofs_*.json"))
+        all_backup_proofs: dict[str, ProofDict] = {}  # proof_id -> proof
+        backup_proofs_by_mint: dict[str, list[ProofDict]] = {}
+
+        for backup_file in backup_files:
+            try:
+                with open(backup_file, "r") as f:
+                    backup_data = json.load(f)
+
+                proofs = backup_data.get("proofs", [])
+                for proof in proofs:
+                    proof_id = f"{proof['secret']}:{proof['C']}"
+                    if proof_id not in all_backup_proofs:
+                        all_backup_proofs[proof_id] = proof
+
+                        # Group by mint
+                        mint_url = proof.get("mint", "")
+                        if mint_url:
+                            if mint_url not in backup_proofs_by_mint:
+                                backup_proofs_by_mint[mint_url] = []
+                            backup_proofs_by_mint[mint_url].append(proof)
+
+            except Exception as e:
+                print(f"⚠️  Error reading backup file {backup_file}: {e}")
+
+        # Find missing proofs
+        missing_proof_ids = set(all_backup_proofs.keys()) - existing_proofs
+        missing_proofs: list[ProofDict] = []
+
+        for proof_id in missing_proof_ids:
+            missing_proofs.append(all_backup_proofs[proof_id])
+
+        stats = {
+            "total_backup_files": len(backup_files),
+            "total_proofs_in_backups": len(all_backup_proofs),
+            "missing_from_nostr": len(missing_proofs),
+            "recovered": 0,
+            "failed": 0,
+        }
+
+        print(f"📊 Found {len(backup_files)} backup files")
+        print(f"   📦 Total proofs in backups: {len(all_backup_proofs)}")
+        print(f"   ✅ Already on Nostr: {len(all_backup_proofs) - len(missing_proofs)}")
+        print(f"   ❌ Missing from Nostr: {len(missing_proofs)}")
+
+        if not missing_proofs:
+            print("✨ All proofs are already backed up on Nostr!")
+            return stats
+
+        if not auto_publish:
+            print("\n💡 To recover missing proofs, run with auto_publish=True")
+            return stats
+
+        # Validate missing proofs before publishing
+        print("\n🔐 Validating missing proofs with mints...")
+        valid_missing_proofs = await self._validate_proofs_with_cache(missing_proofs)
+        invalid_count = len(missing_proofs) - len(valid_missing_proofs)
+
+        if invalid_count > 0:
+            print(f"   ⚠️  {invalid_count} proofs are already spent or invalid")
+
+        if not valid_missing_proofs:
+            print("❌ No valid proofs to recover")
+            # Clean up backup files that only contain spent proofs
+            if auto_publish and len(missing_proofs) > 0:
+                print("🧹 Cleaning up backup files with only spent proofs...")
+                cleaned = await self._cleanup_spent_proof_backups()
+                if cleaned > 0:
+                    print(f"   ✅ Cleaned up {cleaned} backup files")
+            return stats
+
+        # Group valid missing proofs by mint
+        missing_by_mint: dict[str, list[ProofDict]] = {}
+        for proof in valid_missing_proofs:
+            mint_url = proof.get("mint", "")
+            if mint_url:
+                if mint_url not in missing_by_mint:
+                    missing_by_mint[mint_url] = []
+                missing_by_mint[mint_url].append(proof)
+
+        # Publish missing proofs to Nostr
+        print(f"\n📤 Publishing {len(valid_missing_proofs)} missing proofs to Nostr...")
+
+        for mint_url, mint_proofs in missing_by_mint.items():
+            try:
+                event_manager = await self._ensure_event_manager()
+                event_id = await event_manager.publish_token_event(mint_proofs)
+                stats["recovered"] += len(mint_proofs)
+                print(f"   ✅ Published {len(mint_proofs)} proofs for {mint_url}")
+                print(f"      Event ID: {event_id}")
+
+                # Also create spending history for recovery
+                total_amount = sum(p["amount"] for p in mint_proofs)
+                await event_manager.publish_spending_history(
+                    direction="in",
+                    amount=total_amount,
+                    created_token_ids=[event_id],
+                )
+
+            except Exception as e:
+                print(f"   ❌ Failed to publish proofs for {mint_url}: {e}")
+                stats["failed"] += len(mint_proofs)
+
+        # Clean up successfully recovered backup files (with verification)
+        if stats["recovered"] > 0 and stats["failed"] == 0:
+            print("\n🔍 Verifying recovered proofs before cleaning up backups...")
+
+            # Re-fetch state to ensure all recovered proofs are really on relays
+            await asyncio.sleep(2.0)  # Give relays time to propagate
+
+            try:
+                verification_state = await self.fetch_wallet_state(
+                    check_proofs=False, check_local_backups=False
+                )
+                stored_proof_ids = set(
+                    f"{p['secret']}:{p['C']}" for p in verification_state.proofs
+                )
+
+                # Check each backup file individually
+                for backup_file in backup_files:
+                    try:
+                        with open(backup_file, "r") as f:
+                            backup_data = json.load(f)
+
+                        backup_proofs = backup_data.get("proofs", [])
+                        all_verified = True
+
+                        for proof in backup_proofs:
+                            proof_id = f"{proof['secret']}:{proof['C']}"
+                            if proof_id not in stored_proof_ids:
+                                # Check if it's spent (which is okay)
+                                if proof_id not in self._known_spent_proofs:
+                                    all_verified = False
+                                    break
+
+                        if all_verified:
+                            backup_file.unlink()
+                            print(f"   ✅ Verified and deleted: {backup_file.name}")
+                        else:
+                            print(
+                                f"   ⚠️  Keeping backup (not all proofs verified): {backup_file.name}"
+                            )
+
+                    except Exception as e:
+                        print(f"   ⚠️  Error processing {backup_file.name}: {e}")
+
+            except Exception as e:
+                print(f"   ❌ Verification failed, keeping all backups: {e}")
+
+        print(f"\n✨ Recovery complete! Recovered {stats['recovered']} proofs")
+        return stats

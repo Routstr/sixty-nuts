@@ -2016,6 +2016,252 @@ def cleanup(
 
 
 @app.command()
+def backup(
+    mint_urls: Annotated[
+        Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
+    ] = None,
+    list_backups: Annotated[
+        bool, typer.Option("--list", "-l", help="List all backup files")
+    ] = False,
+    scan: Annotated[
+        bool, typer.Option("--scan", "-s", help="Scan for proofs missing from Nostr")
+    ] = False,
+    recover: Annotated[
+        bool, typer.Option("--recover", "-r", help="Recover missing proofs to Nostr")
+    ] = False,
+    clean: Annotated[
+        bool, typer.Option("--clean", "-c", help="Clean up verified backup files")
+    ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
+) -> None:
+    """Manage local proof backups and recovery.
+
+    Local backups ensure proofs are never lost due to relay issues.
+    Use --scan to check for missing proofs and --recover to restore them.
+    """
+
+    async def _backup():
+        nsec = get_nsec()
+        async with await create_wallet_with_mint_selection(
+            nsec, mint_urls=mint_urls
+        ) as wallet:
+            from pathlib import Path
+
+            backup_dir = Path.cwd() / "proof_backups"
+
+            if list_backups:
+                console.print("\n[cyan]📁 Local Backup Files[/cyan]")
+
+                if not backup_dir.exists():
+                    console.print("[yellow]No backup directory found[/yellow]")
+                    return
+
+                backup_files = list(backup_dir.glob("proofs_*.json"))
+                if not backup_files:
+                    console.print("[yellow]No backup files found[/yellow]")
+                    return
+
+                total_size = 0
+                table = Table(show_header=True, header_style="bold cyan")
+                table.add_column("File", style="green")
+                table.add_column("Size", style="blue")
+                table.add_column("Modified", style="yellow")
+                table.add_column("Proofs", style="magenta")
+
+                for bf in sorted(
+                    backup_files, key=lambda x: x.stat().st_mtime, reverse=True
+                ):
+                    size = bf.stat().st_size
+                    total_size += size
+                    mtime = time.strftime(
+                        "%Y-%m-%d %H:%M", time.localtime(bf.stat().st_mtime)
+                    )
+
+                    # Try to read proof count
+                    try:
+                        import json
+
+                        with open(bf, "r") as f:
+                            data = json.load(f)
+                        proof_count = len(data.get("proofs", []))
+                    except Exception:
+                        proof_count = "?"
+
+                    table.add_row(bf.name, f"{size:,} bytes", mtime, str(proof_count))
+
+                console.print(table)
+                console.print(
+                    f"\n[blue]Total: {len(backup_files)} files, {total_size:,} bytes[/blue]"
+                )
+
+            elif scan or recover:
+                console.print("\n[cyan]🔍 Scanning local proof backups...[/cyan]")
+
+                if not backup_dir.exists():
+                    console.print("[yellow]No backup directory found[/yellow]")
+                    console.print(
+                        "[dim]Backups are created automatically when storing proofs[/dim]"
+                    )
+                    return
+
+                # Scan for missing proofs
+                stats = await wallet.scan_and_recover_local_proofs(auto_publish=False)
+
+                console.print("\n[cyan]📊 Backup Scan Results[/cyan]")
+                console.print(
+                    f"Total backup files: [blue]{stats['total_backup_files']}[/blue]"
+                )
+                console.print(
+                    f"Total proofs in backups: [blue]{stats['total_proofs_in_backups']}[/blue]"
+                )
+                console.print(
+                    f"Missing from Nostr: [yellow]{stats['missing_from_nostr']}[/yellow]"
+                )
+
+                if stats["missing_from_nostr"] == 0:
+                    console.print(
+                        "\n[green]✅ All proofs are already backed up on Nostr![/green]"
+                    )
+                    return
+
+                if scan and not recover:
+                    console.print(
+                        f"\n[yellow]ℹ️  Found {stats['missing_from_nostr']} missing proofs[/yellow]"
+                    )
+                    console.print("[dim]Use --recover to restore them to Nostr[/dim]")
+                    return
+
+                # Recover missing proofs
+                if recover:
+                    if not confirm:
+                        console.print(
+                            f"\n[yellow]⚠️  Found {stats['missing_from_nostr']} proofs not on Nostr[/yellow]"
+                        )
+                        if not typer.confirm("Recover these proofs?"):
+                            console.print("[yellow]Recovery cancelled[/yellow]")
+                            return
+
+                    console.print("\n[blue]🚀 Recovering missing proofs...[/blue]")
+                    recovery_stats = await wallet.scan_and_recover_local_proofs(
+                        auto_publish=True
+                    )
+
+                    console.print("\n[cyan]📊 Recovery Results[/cyan]")
+                    console.print(
+                        f"Recovered: [green]{recovery_stats['recovered']}[/green] proofs"
+                    )
+                    console.print(
+                        f"Failed: [red]{recovery_stats['failed']}[/red] proofs"
+                    )
+
+                    if recovery_stats["recovered"] > 0:
+                        console.print("\n[green]✅ Recovery successful![/green]")
+
+                        # Check new balance
+                        balance = await wallet.get_balance()
+                        console.print(
+                            f"\n💰 Current balance: [green]{balance} sats[/green]"
+                        )
+                    else:
+                        console.print("\n[red]❌ No proofs were recovered[/red]")
+
+            elif clean:
+                console.print("\n[cyan]🧹 Cleaning up verified backups...[/cyan]")
+
+                if not backup_dir.exists():
+                    console.print("[yellow]No backup directory found[/yellow]")
+                    return
+
+                backup_files = list(backup_dir.glob("proofs_*.json"))
+                if not backup_files:
+                    console.print("[yellow]No backup files to clean[/yellow]")
+                    return
+
+                console.print(f"Found [blue]{len(backup_files)}[/blue] backup file(s)")
+
+                if not confirm:
+                    console.print(
+                        "\n[yellow]⚠️  This will delete backup files that are verified on Nostr[/yellow]"
+                    )
+                    if not typer.confirm("Continue with cleanup?"):
+                        console.print("[yellow]Cleanup cancelled[/yellow]")
+                        return
+
+                # Run recovery which will clean up verified backups
+                console.print("\n[blue]Verifying and cleaning up backups...[/blue]")
+                stats = await wallet.scan_and_recover_local_proofs(auto_publish=True)
+
+                # Check remaining backups
+                remaining = list(backup_dir.glob("proofs_*.json"))
+                cleaned = len(backup_files) - len(remaining)
+
+                if cleaned > 0:
+                    console.print(
+                        f"\n[green]✅ Cleaned up {cleaned} backup file(s)[/green]"
+                    )
+                else:
+                    console.print(
+                        "\n[yellow]ℹ️  No backups were cleaned (may still be needed)[/yellow]"
+                    )
+
+                if remaining:
+                    console.print(f"[blue]Remaining backups: {len(remaining)}[/blue]")
+            else:
+                # Default: show backup status
+                console.print("\n[cyan]📁 Local Backup Status[/cyan]")
+
+                if backup_dir.exists():
+                    backup_files = list(backup_dir.glob("proofs_*.json"))
+                    if backup_files:
+                        console.print(f"Backup files: [blue]{len(backup_files)}[/blue]")
+                        total_size = sum(bf.stat().st_size for bf in backup_files)
+                        console.print(f"Total size: [blue]{total_size:,} bytes[/blue]")
+
+                        # Quick scan to check if any might be missing
+                        console.print("\n[dim]Checking for missing proofs...[/dim]")
+                        stats = await wallet.scan_and_recover_local_proofs(
+                            auto_publish=False
+                        )
+
+                        if stats["missing_from_nostr"] > 0:
+                            console.print(
+                                f"\n[yellow]⚠️  {stats['missing_from_nostr']} proofs not on Nostr![/yellow]"
+                            )
+                            console.print(
+                                "[dim]Use 'nuts backup --recover' to restore them[/dim]"
+                            )
+                        else:
+                            console.print(
+                                "\n[green]✅ All proofs are backed up on Nostr[/green]"
+                            )
+                    else:
+                        console.print(
+                            "[green]No backup files (all proofs are on Nostr)[/green]"
+                        )
+                else:
+                    console.print(
+                        "[green]No backup directory (no backups needed yet)[/green]"
+                    )
+
+                console.print("\n[dim]Commands:[/dim]")
+                console.print("  nuts backup --list     # List all backup files")
+                console.print("  nuts backup --scan     # Scan for missing proofs")
+                console.print("  nuts backup --recover  # Recover missing proofs")
+                console.print("  nuts backup --clean    # Clean up verified backups")
+
+    try:
+        asyncio.run(_backup())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Backup operation cancelled[/yellow]")
+        raise typer.Exit()
+    except Exception as e:
+        handle_wallet_error(e)
+        raise typer.Exit(1)
+
+
+@app.command()
 def history(
     mint_urls: Annotated[
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
