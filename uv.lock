@@ -459,7 +459,7 @@ wheels = [
 
 [[package]]
 name = "sixty-nuts"
-version = "0.0.7"
+version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "bech32" },
@@ -467,9 +467,13 @@ dependencies = [
     { name = "coincurve" },
     { name = "cryptography" },
     { name = "httpx" },
-    { name = "qrcode" },
     { name = "typer" },
     { name = "websockets" },
+]
+
+[package.optional-dependencies]
+qr = [
+    { name = "qrcode" },
 ]
 
 [package.dev-dependencies]
@@ -486,10 +490,11 @@ requires-dist = [
     { name = "coincurve", specifier = ">=21.0.0" },
     { name = "cryptography", specifier = ">=45.0.3" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "qrcode", specifier = ">=8" },
+    { name = "qrcode", marker = "extra == 'qr'", specifier = ">=8.0" },
     { name = "typer", specifier = ">=0.16.0" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
+provides-extras = ["qr"]
 
 [package.metadata.requires-dev]
 dev = [
