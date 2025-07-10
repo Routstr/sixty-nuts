@@ -4,7 +4,7 @@ import asyncio
 import os
 import shutil
 import time
-from typing import Annotated, Optional
+from typing import Annotated, Optional, cast
 
 import typer
 from rich.console import Console
@@ -29,6 +29,8 @@ from .wallet import (
     MINTS_ENV_VAR,
     set_mints_in_env,
     clear_mints_from_env,
+    CurrencyUnit,
+    ProofDict,
 )
 from .temp import redeem_to_lnurl
 from .relay import prompt_user_for_relays, RELAYS_ENV_VAR
@@ -675,6 +677,110 @@ def handle_wallet_error(e: Exception) -> None:
         console.print(f"[red]❌ Error: {e}[/red]")
 
 
+async def prompt_user_for_mint_and_keyset(
+    wallet,
+    mint_unit: "CurrencyUnit",
+) -> tuple[str, str]:
+    """Prompt user to select mint and optionally keyset when multiple options are available.
+
+    Args:
+        wallet: Wallet instance
+        mint_unit: Currency unit to mint
+
+    Returns:
+        Tuple of (target_mint_url, target_keyset_id)
+
+    Raises:
+        typer.Exit: If user cancels selection or no valid options
+    """
+    # Update keysets from all mints
+    for mint_url in wallet.mint_urls:
+        await wallet._update_keysets_from_mint(mint_url)
+
+    # Find all mints and keysets that support the requested unit
+    available_options: list[
+        tuple[str, str, str]
+    ] = []  # (mint_url, keyset_id, keyset_display)
+
+    for mint_url in wallet.mint_urls:
+        mint_keysets = wallet.keyset_manager.get_mint_keysets(mint_url)
+        for ks in mint_keysets:
+            if ks.unit == mint_unit and ks.active:
+                mint_display = mint_url[:40] + "..." if len(mint_url) > 43 else mint_url
+                keyset_display = f"{ks.id[:16]}... - {ks.unit.upper()}"
+                if ks.input_fee_ppk:
+                    keyset_display += f" (fee: {ks.input_fee_ppk} ppk)"
+                available_options.append(
+                    (mint_url, ks.id, f"{mint_display} | {keyset_display}")
+                )
+
+    if not available_options:
+        console.print(f"[red]No mints found that support {mint_unit.upper()}[/red]")
+        console.print("\nAvailable currencies by mint:")
+        for mint_url in wallet.mint_urls:
+            mint_keysets = wallet.keyset_manager.get_mint_keysets(mint_url)
+            units = set(ks.unit for ks in mint_keysets if ks.active)
+            if units:
+                console.print(f"  {mint_url}: {', '.join(u.upper() for u in units)}")
+        raise typer.Exit(1)
+
+    # If only one option, use it automatically
+    if len(available_options) == 1:
+        return available_options[0][0], available_options[0][1]
+
+    # Multiple options - prompt user to choose
+    console.print(f"\n[cyan]🏦 Multiple mints support {mint_unit.upper()}[/cyan]")
+    console.print(f"Found {len(available_options)} minting options:")
+
+    # Create selection table
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Mint & Keyset", style="green")
+
+    for i, (mint_url, keyset_id, display_text) in enumerate(available_options, 1):
+        table.add_row(str(i), display_text)
+
+    console.print(table)
+
+    # Prompt for selection
+    while True:
+        try:
+            choice = Prompt.ask(
+                f"\nSelect mint and keyset for {mint_unit.upper()} minting", default="1"
+            )
+
+            if choice.isdigit():
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(available_options):
+                    selected_mint, selected_keyset, _ = available_options[
+                        choice_num - 1
+                    ]
+
+                    # Show selection
+                    keyset_info = wallet.keyset_manager.get_keyset(selected_keyset)
+                    mint_display = (
+                        selected_mint[:40] + "..."
+                        if len(selected_mint) > 43
+                        else selected_mint
+                    )
+                    console.print(f"[green]✅ Selected: {mint_display}[/green]")
+                    console.print(
+                        f"[dim]   Keyset: {selected_keyset[:16]}... ({keyset_info.unit.upper()})[/dim]"
+                    )
+
+                    return selected_mint, selected_keyset
+                else:
+                    console.print(
+                        f"[red]Invalid choice. Please enter 1-{len(available_options)}[/red]"
+                    )
+            else:
+                console.print("[red]Please enter a number[/red]")
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Selection cancelled[/yellow]")
+            raise typer.Exit(1)
+
+
 async def _debug_nostr_state(wallet: Wallet) -> None:
     """Debug Nostr relay state and proof storage."""
     from datetime import datetime
@@ -886,8 +992,14 @@ def balance(
         bool,
         typer.Option("--nostr-debug", help="Show detailed Nostr relay debugging info"),
     ] = False,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Filter by currency unit (sat, usd, eur, etc.)"
+        ),
+    ] = None,
 ) -> None:
-    """Check wallet balance."""
+    """Check wallet balance across all currencies and keysets."""
 
     async def _balance() -> None:
         nsec = get_nsec()
@@ -899,56 +1011,155 @@ def balance(
             if nostr_debug:
                 await _debug_nostr_state(wallet)
 
-            if validate:
-                balance_amount = await wallet.get_balance(check_proofs=True)
-                console.print(
-                    f"[green]✅ Validated Balance: {balance_amount} sats[/green]"
-                )
+            # Get the enhanced wallet state with keyset info
+            state = await wallet.fetch_wallet_state(check_proofs=validate)
+
+            # Filter by unit if specified
+            if unit:
+                unit_cast = cast(CurrencyUnit, unit)
+                if unit_cast in state.balance_by_currency:
+                    unit_balance = state.balance_by_currency[unit_cast]
+                    console.print(
+                        f"[green]✅ {unit.upper()} Balance: {unit_balance} {unit}[/green]"
+                    )
+                else:
+                    console.print(f"[yellow]No balance in {unit.upper()}[/yellow]")
+                    return
             else:
-                balance_amount = await wallet.get_balance(check_proofs=False)
-                console.print(
-                    f"[yellow]📊 Quick Balance: {balance_amount} sats[/yellow]"
-                )
-                console.print("[dim](not validated with mint)[/dim]")
+                # Show all currency balances
+                console.print("[green]✅ Balance by Currency:[/green]")
+
+                if not state.balance_by_currency:
+                    console.print("[yellow]No balance found[/yellow]")
+                    return
+
+                # Create currency table
+                currency_table = Table(title="Currency Balances")
+                currency_table.add_column("Currency", style="cyan")
+                currency_table.add_column("Balance", style="green")
+                currency_table.add_column("Approx USD", style="yellow")
+
+                for currency, balance in state.balance_by_currency.items():
+                    # Simple USD approximation (in production, use real exchange rates)
+                    usd_value = ""
+                    if currency == "sat":
+                        # Assume 1 BTC = $50,000 for example
+                        usd_value = f"~${balance * 50000 / 100_000_000:.2f}"
+                    elif currency == "usd":
+                        usd_value = f"${balance / 100:.2f}"  # Assuming cents
+                    elif currency == "eur":
+                        usd_value = (
+                            f"~${balance * 1.1 / 100:.2f}"  # Assuming EUR/USD = 1.1
+                        )
+
+                    currency_table.add_row(
+                        currency.upper(), f"{balance} {currency}", usd_value
+                    )
+
+                console.print(currency_table)
 
             if details:
-                state = await wallet.fetch_wallet_state(check_proofs=validate)
+                # Create detailed keyset table with wider columns
+                keyset_table = Table(title="Keyset Details")
+                keyset_table.add_column("Mint", style="blue", min_width=35)
+                keyset_table.add_column("Keyset ID", style="cyan", min_width=20)
+                keyset_table.add_column("Unit", style="green", min_width=6)
+                keyset_table.add_column("Balance", style="yellow", min_width=9)
+                keyset_table.add_column("Proofs", style="magenta", min_width=8)
+                keyset_table.add_column("Status", style="white", min_width=11)
 
-                # Create table for mint breakdown
-                table = Table(title="Wallet Details")
-                table.add_column("Mint", style="cyan")
-                table.add_column("Balance", style="green")
-                table.add_column("Proofs", style="blue")
-                table.add_column("Denominations", style="magenta")
-
-                # Group proofs by mint
-                proofs_by_mint: dict[str, list] = {}
+                # Group proofs by keyset
+                proofs_by_keyset: dict[str, list[ProofDict]] = {}
                 for proof in state.proofs:
-                    mint_url = proof.get("mint") or "unknown"
-                    if mint_url not in proofs_by_mint:
-                        proofs_by_mint[mint_url] = []
-                    proofs_by_mint[mint_url].append(proof)
+                    keyset_id = proof.get("id", "unknown")
+                    if keyset_id not in proofs_by_keyset:
+                        proofs_by_keyset[keyset_id] = []
+                    proofs_by_keyset[keyset_id].append(proof)
 
-                for mint_url, proofs in proofs_by_mint.items():
-                    mint_balance = sum(p["amount"] for p in proofs)
-                    # Get denomination breakdown
-                    denominations: dict[int, int] = {}
-                    for proof in proofs:
-                        amount = proof["amount"]
-                        denominations[amount] = denominations.get(amount, 0) + 1
+                # Ensure we have keyset info for all keysets with balances
+                for keyset_id in state.balance_by_keyset.keys():
+                    if keyset_id not in state.keysets:
+                        # Try to find the mint URL from proofs and fetch keyset info
+                        proofs_for_keyset = proofs_by_keyset.get(keyset_id, [])
+                        if proofs_for_keyset:
+                            mint_url = proofs_for_keyset[0].get("mint", "")
+                            if mint_url:
+                                try:
+                                    await wallet._update_keysets_from_mint(mint_url)
+                                except Exception as e:
+                                    console.print(
+                                        f"[dim]Warning: Could not fetch keyset info for {mint_url}: {e}[/dim]"
+                                    )
 
-                    denom_str = ", ".join(
-                        f"{amt}×{count}" for amt, count in sorted(denominations.items())
-                    )
+                # Refresh state keysets after any updates
+                state_keysets = wallet.keyset_manager.keysets.copy()
 
-                    table.add_row(
-                        mint_url[:30] + "..." if len(mint_url) > 33 else mint_url,
-                        f"{mint_balance} sats",
-                        str(len(proofs)),
-                        denom_str,
-                    )
+                for keyset_id, balance in state.balance_by_keyset.items():
+                    keyset_info = state_keysets.get(keyset_id)
+                    proof_count = len(proofs_by_keyset.get(keyset_id, []))
 
-                console.print(table)
+                    if keyset_info:
+                        # Truncate mint URL more intelligently
+                        mint_url = keyset_info.mint_url
+                        if len(mint_url) > 35:
+                            # Show beginning and end with ellipsis
+                            mint_display = f"{mint_url[:16]}...{mint_url[-16:]}"
+                        else:
+                            mint_display = mint_url
+
+                        status = "✅ Active" if keyset_info.active else "❌ Inactive"
+                        unit_display = keyset_info.unit.upper()
+                        balance_display = f"{balance} {keyset_info.unit}"
+
+                        # Show more of keyset ID
+                        keyset_display = f"{keyset_id[:16]}..."
+
+                        keyset_table.add_row(
+                            keyset_display,
+                            mint_display,
+                            unit_display,
+                            balance_display,
+                            str(proof_count),
+                            status,
+                        )
+                    else:
+                        # Handle missing keyset info - try to get mint from proofs
+                        proofs_for_keyset = proofs_by_keyset.get(keyset_id, [])
+                        mint_url = "unknown"
+                        if proofs_for_keyset:
+                            mint_url = proofs_for_keyset[0].get("mint", "unknown")
+                            if len(mint_url) > 35:
+                                mint_url = f"{mint_url[:16]}...{mint_url[-16:]}"
+
+                        keyset_table.add_row(
+                            f"{keyset_id[:16]}...",
+                            mint_url,
+                            "unknown",
+                            f"{balance} ???",
+                            str(proof_count),
+                            "❓ Unknown",
+                        )
+
+                console.print("\n")
+                console.print(keyset_table)
+
+                # Show denomination breakdown per keyset if requested
+                if typer.confirm("\nShow denomination breakdown?", default=False):
+                    for keyset_id, proofs in proofs_by_keyset.items():
+                        if proofs:
+                            keyset_info = state.keysets.get(keyset_id)
+                            console.print(
+                                f"\n[cyan]Keyset {keyset_id[:16]}... ({keyset_info.unit if keyset_info else 'unknown'}):[/cyan]"
+                            )
+
+                            denominations: dict[int, int] = {}
+                            for proof in proofs:
+                                amount = proof["amount"]
+                                denominations[amount] = denominations.get(amount, 0) + 1
+
+                            for denom in sorted(denominations.keys()):
+                                count = denominations[denom]
+                                console.print(f"  {denom} × {count} = {denom * count}")
 
     try:
         asyncio.run(_balance())
@@ -959,7 +1170,9 @@ def balance(
 
 @app.command()
 def send(
-    amount: Annotated[int, typer.Argument(help="Amount to send in sats")],
+    amount: Annotated[
+        int, typer.Argument(help="Amount to send (in specified unit or sats)")
+    ],
     mint_urls: Annotated[
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
@@ -970,72 +1183,133 @@ def send(
         Optional[str],
         typer.Option("--to-lnurl", help="Send directly to LNURL or Lightning address"),
     ] = None,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Currency unit to send from (sat, usd, eur, etc.)"
+        ),
+    ] = None,
+    keyset: Annotated[
+        Optional[str],
+        typer.Option("--keyset", "-k", help="Specific keyset ID to send from"),
+    ] = None,
 ) -> None:
-    """Send sats - create a Cashu token or send to Lightning address.
+    """Send tokens from wallet.
 
-    Create a token:
-        nuts send 1000
-
-    Send to Lightning address:
-        nuts send --to-lnurl user@getalby.com 1000
+    Examples:
+        Send 100 sats: nuts send 100
+        Send 50 USD: nuts send 50 --unit usd
+        Send from specific keyset: nuts send 100 --keyset abc123...
+        Send to Lightning: nuts send 100 --to-lnurl user@getalby.com
     """
 
-    async def _send():
+    async def _send() -> None:
         nsec = get_nsec()
         # Use create_wallet_with_mint_selection for automatic mint discovery and selection
         wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+
         async with wallet:
+            # Get wallet state to check balances
+            state = await wallet.fetch_wallet_state(check_proofs=False)
+
+            # Determine which unit to use
+            send_unit: CurrencyUnit = (
+                cast(CurrencyUnit, unit) if unit else wallet.currency
+            )
+
+            # Check if we have balance in that unit
+            if send_unit not in state.balance_by_currency:
+                console.print(f"[red]No balance in {send_unit.upper()}[/red]")
+                console.print("\nAvailable currencies:")
+                for curr, bal in state.balance_by_currency.items():
+                    console.print(f"  {curr.upper()}: {bal} {curr}")
+                return
+
+            unit_balance = state.balance_by_currency[send_unit]
+
             if to_lnurl:
                 # Send directly to Lightning address
-                console.print(f"[blue]Sending {amount} sats to {to_lnurl}...[/blue]")
+                console.print(
+                    f"[blue]Sending {amount} {send_unit} to {to_lnurl}...[/blue]"
+                )
 
-                # Check balance first
-                balance = await wallet.get_balance()
-                if balance <= amount:
+                # Check balance first (need extra for fees)
+                if unit_balance <= amount:
                     console.print(
-                        f"[red]Insufficient balance! Need >{amount}, have {balance}[/red]"
+                        f"[red]Insufficient balance! Need >{amount}, have {unit_balance} {send_unit}[/red]"
                     )
                     console.print(
-                        "[dim]Lightning payments require fees (typically 1 sat)[/dim]"
+                        "[dim]Lightning payments require fees (typically 1%)[/dim]"
                     )
                     return
 
-                actual_paid = await wallet.send_to_lnurl(to_lnurl, amount)
+                # If keyset specified, use it
+                keyset_id = None
+                if keyset:
+                    if keyset not in state.keysets:
+                        console.print(f"[red]Keyset {keyset} not found[/red]")
+                        return
+                    keyset_id = keyset
+                    console.print(f"[dim]Using keyset: {keyset_id[:16]}...[/dim]")
+
+                actual_paid = await wallet.send_to_lnurl(
+                    to_lnurl, amount, unit=send_unit, keyset_id=keyset_id
+                )
 
                 console.print("[green]✅ Successfully sent![/green]")
-                console.print(f"Total paid (including fees): {actual_paid} sats")
+                console.print(f"Total paid (including fees): {actual_paid} {send_unit}")
 
                 # Show remaining balance
-                balance = await wallet.get_balance()
-                console.print(f"Remaining balance: {balance} sats")
+                new_state = await wallet.fetch_wallet_state(check_proofs=False)
+                new_balance = new_state.balance_by_currency.get(send_unit, 0)
+                console.print(f"Remaining balance: {new_balance} {send_unit}")
 
             else:
                 # Create Cashu token
-                console.print(f"[blue]Creating token for {amount} sats...[/blue]")
+                console.print(
+                    f"[blue]Creating token for {amount} {send_unit}...[/blue]"
+                )
 
-                # Check balance first
-                balance = await wallet.get_balance()
-                if balance < amount:
+                # Check balance
+                if unit_balance < amount:
                     console.print(
-                        f"[red]Insufficient balance! Need {amount}, have {balance}[/red]"
+                        f"[red]Insufficient balance! Need {amount}, have {unit_balance} {send_unit}[/red]"
                     )
                     return
 
-                token = await wallet.send(amount)
+                # If keyset specified, verify it matches the unit
+                if keyset:
+                    keyset_info = state.keysets.get(keyset)
+                    if not keyset_info:
+                        console.print(f"[red]Keyset {keyset} not found[/red]")
+                        return
+                    if keyset_info.unit != send_unit:
+                        console.print(
+                            f"[red]Keyset {keyset[:16]}... uses {keyset_info.unit}, but you specified {send_unit}[/red]"
+                        )
+                        return
+                    console.print(f"[dim]Using keyset: {keyset[:16]}...[/dim]")
 
-                console.print("\n[green]✅ Cashu Token Created:[/green]")
+                token = await wallet.send(amount, unit=send_unit, keyset_id=keyset)
+
+                console.print(
+                    f"\n[green]✅ Cashu Token Created ({amount} {send_unit}):[/green]"
+                )
                 # Display token without line wrapping for easy copying
                 console.print(token, soft_wrap=True, no_wrap=True)
 
                 # Display QR code unless disabled
                 if not no_qr:
-                    display_qr_code(token, f"Cashu Token ({amount} sats)")
+                    display_qr_code(token, f"Cashu Token ({amount} {send_unit})")
                 else:
                     console.print()
 
                 # Show remaining balance
-                balance = await wallet.get_balance()
-                console.print(f"[dim]Remaining balance: {balance} sats[/dim]")
+                new_state = await wallet.fetch_wallet_state(check_proofs=False)
+                new_balance = new_state.balance_by_currency.get(send_unit, 0)
+                console.print(
+                    f"[dim]Remaining balance: {new_balance} {send_unit}[/dim]"
+                )
 
     try:
         asyncio.run(_send())
@@ -1155,7 +1429,9 @@ def pay(
 
 @app.command()
 def mint(
-    amount: Annotated[int, typer.Argument(help="Amount to mint in sats")],
+    amount: Annotated[
+        int, typer.Argument(help="Amount to mint (in specified unit or sats)")
+    ],
     mint_urls: Annotated[
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
@@ -1165,39 +1441,140 @@ def mint(
     no_qr: Annotated[
         bool, typer.Option("--no-qr", help="Don't display QR code")
     ] = False,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Currency unit to mint (sat, usd, eur, etc.)"
+        ),
+    ] = None,
+    keyset: Annotated[
+        Optional[str],
+        typer.Option("--keyset", "-k", help="Specific keyset ID to mint with"),
+    ] = None,
 ) -> None:
-    """Create Lightning invoice to mint new tokens."""
+    """Create Lightning invoice to mint new tokens.
 
-    async def _mint():
+    Examples:
+        Mint 1000 sats: nuts mint 1000
+        Mint 50 USD: nuts mint 50 --unit usd
+        Mint with specific keyset: nuts mint 100 --keyset abc123...
+    """
+
+    async def _mint() -> None:
         nsec = get_nsec()
         # Use create_wallet_with_mint_selection for automatic mint discovery and selection
         wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+
+        # Determine which unit to mint
+        mint_unit: CurrencyUnit = cast(CurrencyUnit, unit) if unit else wallet.currency
+
         async with wallet:
-            console.print(f"[blue]Creating invoice for {amount} sats...[/blue]")
+            # If keyset specified, verify it exists and get its info
+            target_mint_url = None
+            if keyset:
+                # Update keysets from all mints
+                for mint_url in wallet.mint_urls:
+                    await wallet._update_keysets_from_mint(mint_url)
 
-            invoice, task = await wallet.mint_async(amount, timeout=timeout)
+                keyset_info = wallet.keyset_manager.get_keyset(keyset)
+                if not keyset_info:
+                    console.print(f"[red]Keyset {keyset} not found[/red]")
+                    console.print("\nAvailable keysets:")
 
-            # Display invoice for easy copying
-            console.print("\n[yellow]⚡ Lightning Invoice:[/yellow]")
-            # Display invoice without line wrapping for easy copying
-            console.print(invoice, soft_wrap=False, no_wrap=True, overflow="ignore")
+                    # Show available keysets
+                    for mint_url in wallet.mint_urls:
+                        mint_keysets = wallet.keyset_manager.get_mint_keysets(mint_url)
+                        if mint_keysets:
+                            console.print(f"\n{mint_url}:")
+                            for ks in mint_keysets:
+                                console.print(f"  {ks.id[:16]}... - {ks.unit.upper()}")
+                    return
 
-            # Display QR code unless disabled
-            if not no_qr:
-                display_qr_code(invoice, "Lightning Invoice QR Code")
+                # Verify unit matches
+                if keyset_info.unit != mint_unit:
+                    console.print(
+                        f"[red]Keyset {keyset[:16]}... uses {keyset_info.unit}, but you specified {mint_unit}[/red]"
+                    )
+                    return
+
+                target_mint_url = keyset_info.mint_url
+                target_keyset_id = keyset
+                console.print(
+                    f"[dim]Using specified keyset: {keyset[:16]}... ({keyset_info.unit.upper()})[/dim]"
+                )
             else:
-                console.print()
+                # Prompt user to select mint and keyset when multiple options are available
+                (
+                    target_mint_url,
+                    target_keyset_id,
+                ) = await prompt_user_for_mint_and_keyset(wallet, mint_unit)
+                console.print(
+                    f"[dim]Using selected mint and keyset: {target_keyset_id[:16]}... ({mint_unit.upper()})[/dim]"
+                )
 
-            console.print("[blue]Waiting for payment...[/blue]")
+            console.print(f"[blue]Creating invoice for {amount} {mint_unit}...[/blue]")
 
-            paid = await task
+            # Override wallet currency temporarily for this mint operation
+            original_currency = wallet.currency
+            wallet.currency = mint_unit
 
-            if paid:
-                console.print("[green]✅ Payment received! Tokens minted.[/green]")
-                balance = await wallet.get_balance()
-                console.print(f"New balance: {balance} sats")
-            else:
-                console.print(f"[red]❌ Payment timeout after {timeout} seconds[/red]")
+            try:
+                # Pass the selected mint URL directly instead of reordering
+                invoice, task = await wallet.mint_async(
+                    amount, timeout=timeout, mint_url=target_mint_url
+                )
+
+                # Display invoice for easy copying
+                console.print(
+                    f"\n[yellow]⚡ Lightning Invoice ({amount} {mint_unit}):[/yellow]"
+                )
+                # Display invoice with normal wrapping so it can be copied completely
+                console.print(invoice)
+
+                # Display QR code unless disabled
+                if not no_qr:
+                    display_qr_code(
+                        invoice, f"Lightning Invoice ({amount} {mint_unit})"
+                    )
+                else:
+                    console.print()
+
+                console.print("[blue]Waiting for payment...[/blue]")
+                console.print("[dim]Press Ctrl+C to cancel and return to CLI[/dim]")
+
+                try:
+                    paid = await task
+
+                    if paid:
+                        console.print(
+                            f"[green]✅ Payment received! {amount} {mint_unit} minted.[/green]"
+                        )
+
+                        # Show updated balance
+                        state = await wallet.fetch_wallet_state(check_proofs=False)
+                        if mint_unit in state.balance_by_currency:
+                            new_balance = state.balance_by_currency[mint_unit]
+                            console.print(
+                                f"New {mint_unit.upper()} balance: {new_balance} {mint_unit}"
+                            )
+                    else:
+                        console.print(
+                            f"[red]❌ Payment timeout after {timeout} seconds[/red]"
+                        )
+                        console.print(
+                            "[yellow]Invoice is still valid - you can pay it later[/yellow]"
+                        )
+
+                except Exception as payment_error:
+                    console.print(
+                        f"[red]❌ Payment polling error: {payment_error}[/red]"
+                    )
+                    console.print(
+                        "[yellow]Invoice may still be valid - check with your Lightning wallet[/yellow]"
+                    )
+            finally:
+                # Restore original currency
+                wallet.currency = original_currency
 
     try:
         asyncio.run(_mint())
@@ -1212,7 +1589,7 @@ def info(
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
 ) -> None:
-    """Show wallet information."""
+    """Show comprehensive wallet information including keysets and currencies."""
 
     async def _info():
         nsec = get_nsec()
@@ -1224,6 +1601,10 @@ def info(
             # Get wallet state
             state = await wallet.fetch_wallet_state(check_proofs=False)
 
+            # Update keysets from all mints
+            for mint_url in wallet.mint_urls:
+                await wallet._update_keysets_from_mint(mint_url)
+
             # Create info table
             table = Table(title="Wallet Information")
             table.add_column("Property", style="cyan")
@@ -1231,21 +1612,86 @@ def info(
 
             # Basic info
             table.add_row("Public Key", wallet._get_pubkey())
-            table.add_row("Currency", wallet.currency)
-            table.add_row("Balance", f"{state.balance} sats")
+            table.add_row("Default Currency", wallet.currency.upper())
+            table.add_row("Total Balance (SAT)", f"{state.total_balance_sat} sats")
             table.add_row("Total Proofs", str(len(state.proofs)))
 
-            # Mint info
+            # Currency breakdown
+            if state.balance_by_currency:
+                table.add_row("", "")  # Empty row for spacing
+                table.add_row("[bold]Currency Balances[/bold]", "")
+                for currency, balance in sorted(state.balance_by_currency.items()):
+                    table.add_row(f"  {currency.upper()}", f"{balance} {currency}")
+
+            # Mint info with keyset details
+            table.add_row("", "")  # Empty row for spacing
+            table.add_row("[bold]Mints & Keysets[/bold]", "")
             table.add_row("Configured Mints", str(len(wallet.mint_urls)))
+
             for i, mint_url in enumerate(wallet.mint_urls):
                 table.add_row(f"  Mint {i + 1}", mint_url)
 
+                # Get keysets for this mint
+                mint_keysets = wallet.keyset_manager.get_mint_keysets(mint_url)
+                if mint_keysets:
+                    # Group by currency
+                    currencies = set(ks.unit for ks in mint_keysets if ks.active)
+                    if currencies:
+                        table.add_row(
+                            "    Currencies",
+                            ", ".join(c.upper() for c in sorted(currencies)),
+                        )
+
+                    # Show keyset count
+                    active_count = sum(1 for ks in mint_keysets if ks.active)
+                    total_count = len(mint_keysets)
+                    table.add_row(
+                        "    Keysets", f"{active_count} active / {total_count} total"
+                    )
+
             # Relay info
+            table.add_row("", "")  # Empty row for spacing
+            table.add_row("[bold]Relays[/bold]", "")
             table.add_row("Configured Relays", str(len(wallet.relays)))
             for i, relay_url in enumerate(wallet.relays):
                 table.add_row(f"  Relay {i + 1}", relay_url)
 
             console.print(table)
+
+            # Show keyset details if requested
+            if typer.confirm("\nShow detailed keyset information?", default=False):
+                keyset_table = Table(title="Keyset Details")
+                keyset_table.add_column("Keyset ID", style="cyan")
+                keyset_table.add_column("Mint", style="blue")
+                keyset_table.add_column("Unit", style="green")
+                keyset_table.add_column("Status", style="yellow")
+                keyset_table.add_column("Input Fee", style="magenta")
+
+                all_keysets = []
+                for mint_url in wallet.mint_urls:
+                    all_keysets.extend(wallet.keyset_manager.get_mint_keysets(mint_url))
+
+                for ks in sorted(all_keysets, key=lambda k: (k.mint_url, k.unit, k.id)):
+                    mint_display = (
+                        ks.mint_url[:30] + "..."
+                        if len(ks.mint_url) > 33
+                        else ks.mint_url
+                    )
+                    status = "✅ Active" if ks.active else "❌ Inactive"
+                    fee_display = (
+                        f"{ks.input_fee_ppk} ppk" if ks.input_fee_ppk else "None"
+                    )
+
+                    keyset_table.add_row(
+                        ks.id[:16] + "...",
+                        mint_display,
+                        ks.unit.upper(),
+                        status,
+                        fee_display,
+                    )
+
+                console.print("\n")
+                console.print(keyset_table)
 
     try:
         asyncio.run(_info())
@@ -2723,6 +3169,290 @@ def debug(
 def cli() -> None:
     """Entry point for the CLI."""
     app()
+
+
+@app.command()
+def swap(
+    amount: Annotated[int, typer.Argument(help="Amount to swap")],
+    from_unit: Annotated[
+        str, typer.Argument(help="Source currency (sat, usd, eur, etc.)")
+    ],
+    to_unit: Annotated[
+        str, typer.Argument(help="Target currency (sat, usd, eur, etc.)")
+    ],
+    mint_urls: Annotated[
+        Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
+    ] = None,
+    same_mint: Annotated[
+        bool,
+        typer.Option(
+            "--same-mint",
+            help="Require swap within same mint (default: prefer same mint)",
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
+) -> None:
+    """Exchange tokens between different currencies/keysets.
+
+    This command allows you to swap tokens from one currency to another,
+    either within the same mint (if it supports both currencies) or
+    between different mints.
+
+    Examples:
+        Swap 100 USD to EUR: nuts swap 100 usd eur
+        Swap 1000 sats to USD: nuts swap 1000 sat usd
+        Force same mint: nuts swap 50 eur sat --same-mint
+    """
+
+    async def _swap():
+        nsec = get_nsec()
+        wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+
+        # Cast units to proper type
+        from_currency = cast(CurrencyUnit, from_unit.lower())
+        to_currency = cast(CurrencyUnit, to_unit.lower())
+
+        async with wallet:
+            console.print(
+                f"[blue]Preparing to swap {amount} {from_unit.upper()} → {to_unit.upper()}...[/blue]"
+            )
+
+            # Get current state
+            state = await wallet.fetch_wallet_state(check_proofs=False)
+
+            # Check source balance
+            from_balance = state.balance_by_currency.get(from_currency, 0)
+            if from_balance < amount:
+                console.print(
+                    f"[red]Insufficient {from_unit.upper()} balance! "
+                    f"Need {amount}, have {from_balance}[/red]"
+                )
+                return
+
+            # Update keysets from all mints
+            for mint_url in wallet.mint_urls:
+                await wallet._update_keysets_from_mint(mint_url)
+
+            # Find suitable keysets for the swap
+            from_keysets = wallet.keyset_manager.get_currency_keysets(from_currency)
+            to_keysets = wallet.keyset_manager.get_currency_keysets(to_currency)
+
+            if not from_keysets:
+                console.print(f"[red]No keysets found for {from_unit.upper()}[/red]")
+                return
+
+            if not to_keysets:
+                console.print(f"[red]No keysets found for {to_unit.upper()}[/red]")
+                return
+
+            # Find optimal swap path
+            swap_path = None
+            same_mint_possible = False
+
+            # Check if same mint supports both currencies
+            for from_ks in from_keysets:
+                for to_ks in to_keysets:
+                    if from_ks.mint_url == to_ks.mint_url:
+                        same_mint_possible = True
+                        swap_path = {
+                            "type": "same_mint",
+                            "mint": from_ks.mint_url,
+                            "from_keyset": from_ks.id,
+                            "to_keyset": to_ks.id,
+                        }
+                        break
+                if swap_path:
+                    break
+
+            # If same mint not possible but required, error out
+            if same_mint and not same_mint_possible:
+                console.print(
+                    f"[red]No single mint supports both {from_unit.upper()} and {to_unit.upper()}[/red]"
+                )
+                console.print("Remove --same-mint flag to allow cross-mint swaps")
+                return
+
+            # If no same-mint path found, use cross-mint swap
+            if not swap_path:
+                # Find mints with balance for source currency
+                from_mints = set(ks.mint_url for ks in from_keysets)
+                to_mints = set(ks.mint_url for ks in to_keysets)
+
+                # For now, pick first available mints
+                from_mint = None
+                for m in from_mints:
+                    has_balance = False
+                    for p in state.proofs:
+                        if p.get("mint") == m:
+                            keyset = wallet.keyset_manager.get_keyset(p.get("id", ""))
+                            if keyset and keyset.unit == from_currency:
+                                has_balance = True
+                                break
+                    if has_balance:
+                        from_mint = m
+                        break
+
+                if not from_mint:
+                    console.print(
+                        f"[red]No mint with {from_unit.upper()} balance found[/red]"
+                    )
+                    return
+
+                to_mint = next(iter(to_mints))
+
+                swap_path = {
+                    "type": "cross_mint",
+                    "from_mint": from_mint,
+                    "to_mint": to_mint,
+                    "from_keyset": next(
+                        ks.id for ks in from_keysets if ks.mint_url == from_mint
+                    ),
+                    "to_keyset": next(
+                        ks.id for ks in to_keysets if ks.mint_url == to_mint
+                    ),
+                }
+
+            # Show swap details
+            console.print("\n[cyan]Swap Details:[/cyan]")
+            console.print(f"  Amount: {amount} {from_unit.upper()} → {to_unit.upper()}")
+
+            if swap_path["type"] == "same_mint":
+                console.print(f"  Type: Same-mint swap")
+                console.print(f"  Mint: {swap_path['mint']}")
+            else:
+                console.print(f"  Type: Cross-mint swap (via Lightning)")
+                console.print(f"  From: {swap_path['from_mint']}")
+                console.print(f"  To: {swap_path['to_mint']}")
+                console.print(
+                    f"  [yellow]Note: Cross-mint swaps incur Lightning fees[/yellow]"
+                )
+
+            # Confirm unless auto-confirmed
+            if not confirm:
+                if not typer.confirm("\nProceed with swap?"):
+                    console.print("[yellow]Swap cancelled[/yellow]")
+                    return
+
+            # Execute the swap
+            console.print("\n[blue]Executing swap...[/blue]")
+
+            try:
+                if swap_path["type"] == "same_mint":
+                    # Same-mint swap: just reorganize denominations
+                    # Select proofs from source keyset
+                    source_proofs = [
+                        p
+                        for p in state.proofs
+                        if p.get("id") == swap_path["from_keyset"]
+                        and p.get("mint") == swap_path["mint"]
+                    ]
+
+                    # Filter to get exactly the amount we need
+                    selected_proofs = []
+                    selected_amount = 0
+                    for proof in sorted(
+                        source_proofs, key=lambda p: p["amount"], reverse=True
+                    ):
+                        if selected_amount >= amount:
+                            break
+                        selected_proofs.append(proof)
+                        selected_amount += proof["amount"]
+
+                    if selected_amount < amount:
+                        console.print(
+                            f"[red]Could not select exactly {amount} {from_unit.upper()}[/red]"
+                        )
+                        return
+
+                    # TODO: Implement keyset swap at the mint level
+                    # For now, we'll use the existing swap mechanism
+                    console.print(
+                        "[yellow]Same-mint currency swap not yet implemented[/yellow]"
+                    )
+                    console.print(
+                        "[dim]This feature requires mint support for cross-keyset swaps[/dim]"
+                    )
+
+                else:
+                    # Cross-mint swap: melt from one mint, mint at another
+                    console.print(
+                        f"[dim]Step 1/3: Creating invoice at target mint...[/dim]"
+                    )
+
+                    # Create invoice at target mint for the amount
+                    # Temporarily switch currency for the mint operation
+                    original_currency = wallet.currency
+                    wallet.currency = to_currency
+
+                    try:
+                        target_mint = swap_path["to_mint"]
+                        invoice, mint_task = await wallet.mint_async(amount, timeout=60)
+
+                        console.print(
+                            f"[dim]Step 2/3: Paying invoice from source mint...[/dim]"
+                        )
+
+                        # Pay the invoice using funds from source mint
+                        # The melt operation will automatically select proofs from the right mint/currency
+                        wallet.currency = from_currency
+                        await wallet.melt(invoice, target_mint=swap_path["from_mint"])
+
+                        console.print(
+                            f"[dim]Step 3/3: Receiving tokens at target mint...[/dim]"
+                        )
+
+                        # Wait for the mint to complete
+                        success = await mint_task
+
+                        if success:
+                            console.print(
+                                f"[green]✅ Successfully swapped {amount} {from_unit.upper()} → {to_unit.upper()}![/green]"
+                            )
+
+                            # Show new balances
+                            new_state = await wallet.fetch_wallet_state(
+                                check_proofs=False
+                            )
+
+                            console.print("\n[cyan]Updated Balances:[/cyan]")
+                            old_from = from_balance
+                            new_from = new_state.balance_by_currency.get(
+                                from_currency, 0
+                            )
+                            old_to = state.balance_by_currency.get(to_currency, 0)
+                            new_to = new_state.balance_by_currency.get(to_currency, 0)
+
+                            console.print(
+                                f"  {from_unit.upper()}: {old_from} → {new_from} (-{old_from - new_from})"
+                            )
+                            console.print(
+                                f"  {to_unit.upper()}: {old_to} → {new_to} (+{new_to - old_to})"
+                            )
+
+                            if (old_from - new_from) > amount:
+                                fee = (old_from - new_from) - amount
+                                console.print(
+                                    f"  [yellow]Lightning fees: {fee} {from_unit}[/yellow]"
+                                )
+                        else:
+                            console.print(
+                                "[red]❌ Swap failed - mint did not receive payment[/red]"
+                            )
+
+                    finally:
+                        # Restore original currency
+                        wallet.currency = original_currency
+
+            except Exception as e:
+                console.print(f"[red]❌ Swap failed: {e}[/red]")
+
+    try:
+        asyncio.run(_swap())
+    except Exception as e:
+        handle_wallet_error(e)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

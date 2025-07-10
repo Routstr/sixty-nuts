@@ -6,7 +6,6 @@ import os
 import json
 import secrets
 import time
-from dataclasses import dataclass
 import asyncio
 from pathlib import Path
 
@@ -15,9 +14,7 @@ from coincurve import PrivateKey, PublicKey
 
 from .mint import (
     Mint,
-    ProofComplete as Proof,
-    BlindedMessage,
-    CurrencyUnit,
+    ProofComplete,
 )
 from .relay import (
     RelayManager,
@@ -40,7 +37,15 @@ from .lnurl import (
     parse_lightning_invoice_amount,
     LNURLError,
 )
-from .types import ProofDict, WalletError
+from .types import (
+    ProofDict,
+    WalletError,
+    EnhancedWalletState,
+    KeysetInfo,
+    CurrencyUnit,
+    BlindedMessage,
+    Proof,
+)
 from .events import EventManager
 
 try:
@@ -228,40 +233,104 @@ def validate_mint_url(url: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Protocol-level definitions
+# Keyset Management System
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
-class WalletState:
-    """Current wallet state."""
+class KeysetManager:
+    """Centralized keyset management for multi-currency support."""
 
-    balance: int
-    proofs: list[ProofDict]
-    mint_keysets: dict[str, list[dict[str, str]]]  # mint_url -> keysets
-    proof_to_event_id: dict[str, str] | None = (
-        None  # proof_id -> event_id mapping (TODO)
-    )
+    def __init__(self) -> None:
+        self.keysets: dict[str, KeysetInfo] = {}  # keyset_id -> KeysetInfo
+        self.mint_keysets: dict[str, list[str]] = {}  # mint_url -> [keyset_ids]
+        self.currency_keysets: dict[
+            CurrencyUnit, list[str]
+        ] = {}  # currency -> [keyset_ids]
+        self._cache_expiry = 3600  # 1 hour cache
+        self._cache_timestamps: dict[str, float] = {}  # keyset_id -> timestamp
 
-    @property
-    def proofs_by_mints(self) -> dict[str, list[ProofDict]]:
-        """Group proofs by mint."""
-        return {
-            mint_url: [proof for proof in self.proofs if proof["mint"] == mint_url]
-            for mint_url in self.mint_keysets.keys()
-        }
+    def add_keyset(self, keyset_info: KeysetInfo) -> None:
+        """Add or update a keyset."""
+        keyset_id = keyset_info.id
+        mint_url = keyset_info.mint_url
+        currency = keyset_info.unit
 
-    @property
-    def mint_balances(self) -> dict[str, int]:
-        """Get balances for all mints."""
-        return {
-            mint_url: sum(p["amount"] for p in self.proofs_by_mints[mint_url])
-            for mint_url in self.mint_keysets.keys()
-        }
+        # Store keyset
+        self.keysets[keyset_id] = keyset_info
+        self._cache_timestamps[keyset_id] = time.time()
+
+        # Update mint index
+        if mint_url not in self.mint_keysets:
+            self.mint_keysets[mint_url] = []
+        if keyset_id not in self.mint_keysets[mint_url]:
+            self.mint_keysets[mint_url].append(keyset_id)
+
+        # Update currency index
+        if currency not in self.currency_keysets:
+            self.currency_keysets[currency] = []
+        if keyset_id not in self.currency_keysets[currency]:
+            self.currency_keysets[currency].append(keyset_id)
+
+    def get_keyset(self, keyset_id: str) -> KeysetInfo | None:
+        """Get a keyset by ID."""
+        return self.keysets.get(keyset_id)
+
+    def get_mint_keysets(
+        self, mint_url: str, *, active_only: bool = True
+    ) -> list[KeysetInfo]:
+        """Get all keysets for a mint."""
+        keyset_ids = self.mint_keysets.get(mint_url, [])
+        keysets = [self.keysets[kid] for kid in keyset_ids if kid in self.keysets]
+
+        if active_only:
+            keysets = [ks for ks in keysets if ks.active]
+
+        return keysets
+
+    def get_currency_keysets(
+        self, currency: CurrencyUnit, *, active_only: bool = True
+    ) -> list[KeysetInfo]:
+        """Get all keysets for a currency."""
+        keyset_ids = self.currency_keysets.get(currency, [])
+        keysets = [self.keysets[kid] for kid in keyset_ids if kid in self.keysets]
+
+        if active_only:
+            keysets = [ks for ks in keysets if ks.active]
+
+        return keysets
+
+    def find_keyset(
+        self, mint_url: str, currency: CurrencyUnit, *, active_only: bool = True
+    ) -> KeysetInfo | None:
+        """Find the best keyset for a mint and currency."""
+        mint_keysets = self.get_mint_keysets(mint_url, active_only=active_only)
+        currency_keysets = [ks for ks in mint_keysets if ks.unit == currency]
+
+        if not currency_keysets:
+            return None
+
+        # Prefer keysets with lower fees
+        currency_keysets.sort(key=lambda ks: ks.input_fee_ppk)
+        return currency_keysets[0]
+
+    def is_cached(self, keyset_id: str) -> bool:
+        """Check if keyset is cached and not expired."""
+        if keyset_id not in self._cache_timestamps:
+            return False
+
+        age = time.time() - self._cache_timestamps[keyset_id]
+        return age < self._cache_expiry
+
+    def clear_cache(self) -> None:
+        """Clear all cached keysets."""
+        self.keysets.clear()
+        self.mint_keysets.clear()
+        self.currency_keysets.clear()
+        self._cache_timestamps.clear()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Wallet implementation skeleton
+# Wallet implementation
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -273,8 +342,8 @@ class Wallet:
         nsec: str,  # nostr private key
         *,
         mint_urls: list[str] | None = None,  # cashu mint urls (can have multiple)
-        currency: CurrencyUnit = "sat",  # Updated to use NUT-01 compliant type
-        wallet_privkey: str | None = None,  # separate privkey for P2PK ecash (NIP-61)
+        currency: CurrencyUnit = "sat",  # TODO remove bc multi currency by default
+        wallet_privkey: str | None = None,  # TODO remove contained in wallet event
         relays: list[str] | None = None,  # nostr relays to use
     ) -> None:
         self.nsec = nsec
@@ -298,6 +367,9 @@ class Wallet:
 
         # Mint instances
         self.mints: dict[str, Mint] = {}
+
+        # Keyset manager for multi-currency support
+        self.keyset_manager = KeysetManager()
 
         # Relay manager - will be initialized with proper relays later
         self.relay_manager = RelayManager(
@@ -514,7 +586,7 @@ class Wallet:
         return output_amount, unit  # Return actual amount added to wallet after fees
 
     async def mint_async(
-        self, amount: int, *, timeout: int = 300
+        self, amount: int, *, timeout: int = 300, mint_url: str | None = None
     ) -> tuple[str, asyncio.Task[bool]]:
         """Create a Lightning invoice and return a task that completes when paid.
 
@@ -524,6 +596,7 @@ class Wallet:
         Args:
             amount: Amount in the wallet's currency unit
             timeout: Maximum seconds to wait for payment (default: 5 minutes)
+            mint_url: Specific mint URL to use (defaults to primary mint)
 
         Returns:
             Tuple of (lightning_invoice, payment_task)
@@ -535,9 +608,11 @@ class Wallet:
             # Do other things...
             paid = await task  # Wait for payment
         """
-        mint_url = self._primary_mint_url()
-        invoice, quote_id = await self.create_quote(amount, mint_url)
-        mint = self._get_mint(mint_url)
+        target_mint_url = mint_url or self._primary_mint_url()
+        ## TODO maybe better self._get_mint(mint_url) # returns primary mint if None
+        ## then mint.create_quote(amount)
+        invoice, quote_id = await self.create_quote(amount, target_mint_url)
+        mint = self._get_mint(target_mint_url)
 
         async def poll_payment() -> bool:
             start_time = time.time()
@@ -549,7 +624,7 @@ class Wallet:
                     quote_id,
                     amount,
                     minted_quotes=self._minted_quotes,
-                    mint_url=mint_url,
+                    mint_url=target_mint_url,  # TODO this should not be needed, mint instance should contain url
                 )
 
                 # If new proofs were minted, publish wallet events
@@ -595,7 +670,13 @@ class Wallet:
 
     # ─────────────────────────────── Send ─────────────────────────────────────
 
-    async def melt(self, invoice: str, *, target_mint: str | None = None) -> None:
+    async def melt(
+        self,
+        invoice: str,
+        *,
+        target_mint: str | None = None,  # TODO remove because keyset contain mint info
+        target_keyset_id: str | None = None,  # TODO implement
+    ) -> None:
         """Pay a Lightning invoice by melting tokens with automatic multi-mint support.
 
         Args:
@@ -616,7 +697,7 @@ class Wallet:
         # Get current state and check balance
         state = await self.fetch_wallet_state(check_proofs=True)
         total_needed = int(invoice_amount * 1.01)
-        self.raise_if_insufficient_balance(state.balance, total_needed)
+        self.raise_if_insufficient_balance(state.total_balance_sat, total_needed)
 
         if target_mint is None:
             mint_balances = state.mint_balances
@@ -643,7 +724,10 @@ class Wallet:
         mint_proofs = [self._proofdict_to_mint_proof(p) for p in selected_proofs]
 
         # Execute the melt operation
-        melt_resp = await mint.melt(quote=melt_quote["quote"], inputs=mint_proofs)
+        # Cast to ProofComplete since melt expects it (ProofComplete extends Proof with optional fields)
+        melt_resp = await mint.melt(
+            quote=melt_quote["quote"], inputs=cast(list[ProofComplete], mint_proofs)
+        )
 
         # Check if payment was successful
         if not melt_resp.get("paid", False):
@@ -678,9 +762,12 @@ class Wallet:
     async def send(
         self,
         amount: int,
-        target_mint: str | None = None,
+        target_mint: str | None = None,  # TODO remove bc keyset contains mint info
+        keyset_id: str | None = None,  # TODO implement
         *,
         token_version: int = 4,  # Default to V4 (CashuB)
+        unit: CurrencyUnit
+        | None = None,  # TODO remove bc keyset should handle currency
     ) -> str:
         """Create a Cashu token for sending.
 
@@ -689,9 +776,11 @@ class Wallet:
         splitting proofs to achieve exact amounts.
 
         Args:
-            amount: Amount to send in the wallet's currency unit
+            amount: Amount to send in the specified currency unit
             target_mint: Target mint URL (defaults to primary mint)
             token_version: Token format version (3 for CashuA, 4 for CashuB)
+            unit: Currency unit to send (defaults to wallet's currency)
+            keyset_id: Specific keyset ID to send from
 
         Returns:
             Cashu token string that can be sent to another wallet
@@ -706,23 +795,76 @@ class Wallet:
 
             # Send using V3 format
             token = await wallet.send(100, token_version=3)
+
+            # Send USD tokens
+            token = await wallet.send(50, unit="usd")
+
+            # Send from specific keyset
+            token = await wallet.send(100, keyset_id="abc123...")
         """
         if token_version not in [3, 4]:
             raise ValueError(f"Unsupported token version: {token_version}. Use 3 or 4.")
 
-        if target_mint is None:
-            target_mint = await self.summon_mint_with_balance(amount)
+        # Use specified unit or default to wallet currency
+        send_unit = unit or self.currency
 
+        # Get wallet state and filter proofs by unit/keyset
         state = await self.fetch_wallet_state(check_proofs=True)
-        balance = await self.get_balance_by_mint(target_mint)
-        if balance < amount:
+
+        # Filter proofs based on unit and keyset_id
+        filtered_proofs = state.proofs
+        if keyset_id:
+            # If keyset_id specified, use only proofs from that keyset
+            filtered_proofs = [p for p in filtered_proofs if p.get("id") == keyset_id]
+            if not filtered_proofs:
+                raise WalletError(f"No proofs found for keyset {keyset_id}")
+
+            # Verify keyset matches requested unit
+            keyset_info = self.keyset_manager.get_keyset(keyset_id)
+            if keyset_info and keyset_info.unit != send_unit:
+                raise WalletError(
+                    f"Keyset {keyset_id} uses {keyset_info.unit}, but requested {send_unit}"
+                )
+        else:
+            # Filter by currency unit
+            unit_filtered = []
+            for proof in filtered_proofs:
+                proof_keyset = self.keyset_manager.get_keyset(proof.get("id", ""))
+                if proof_keyset and proof_keyset.unit == send_unit:
+                    unit_filtered.append(proof)
+            filtered_proofs = unit_filtered
+
+            if not filtered_proofs:
+                raise WalletError(f"No proofs found for currency {send_unit}")
+
+        # Calculate balance from filtered proofs
+        filtered_balance = sum(p["amount"] for p in filtered_proofs)
+
+        if target_mint is None:
+            # Find mint with balance in the requested currency
+            mint_urls = set(p.get("mint", "") for p in filtered_proofs)
+            if not mint_urls:
+                raise WalletError(f"No mints found with {send_unit} balance")
+
+            # Use mint with highest balance
+            best_mint = ""
+            best_balance = 0
+            for mint_url in mint_urls:
+                mint_proofs = [p for p in filtered_proofs if p.get("mint") == mint_url]
+                mint_balance = sum(p["amount"] for p in mint_proofs)
+                if mint_balance > best_balance:
+                    best_balance = mint_balance
+                    best_mint = mint_url
+            target_mint = best_mint
+
+        if filtered_balance < amount:
             raise WalletError(
-                f"Insufficient balance at {target_mint}. Need at least {amount} {self.currency} "
-                f"(amount: {amount}), but have {balance}"
+                f"Insufficient balance. Need at least {amount} {send_unit}, "
+                f"but have {filtered_balance}"
             )
 
         selected_proofs, consumed_proofs = await self._select_proofs(
-            state.proofs, amount, target_mint
+            filtered_proofs, amount, target_mint
         )
 
         token = self._serialize_proofs_for_token(
@@ -738,18 +880,24 @@ class Wallet:
 
         return token
 
-    async def send_to_lnurl(self, lnurl: str, amount: int) -> int:
+    async def send_to_lnurl(
+        self,
+        lnurl: str,
+        amount: int,
+        *,
+        unit: CurrencyUnit | None = None,
+        keyset_id: str | None = None,
+    ) -> int:
         """Send funds to an LNURL address.
 
         Args:
             lnurl: LNURL string (can be lightning:, user@host, bech32, or direct URL)
-            amount: Amount to send in the wallet's currency unit
-            fee_estimate: Fee estimate as a percentage (default: 1%)
-            max_fee: Maximum fee in the wallet's currency unit (optional)
-            mint_fee_reserve: Expected mint fee reserve (default: 1 sat)
+            amount: Amount to send in the specified currency unit
+            unit: Currency unit to send (defaults to wallet's currency)
+            keyset_id: Specific keyset ID to send from
 
         Returns:
-            Amount actually paid in the wallet's currency unit
+            Amount actually paid in the specified currency unit
 
         Raises:
             WalletError: If amount is outside LNURL limits or insufficient balance
@@ -759,40 +907,49 @@ class Wallet:
             # Send 1000 sats to a Lightning Address
             paid = await wallet.send_to_lnurl("user@getalby.com", 1000)
             print(f"Paid {paid} sats")
+
+            # Send USD to Lightning Address
+            paid = await wallet.send_to_lnurl("user@getalby.com", 50, unit="usd")
         """
 
-        # Get current balance
-        state = await self.fetch_wallet_state(check_proofs=True)
-        balance = state.balance
+        # Use specified unit or default to wallet currency
+        send_unit = unit or self.currency
 
+        # Get current balance for the specified unit
+        state = await self.fetch_wallet_state(check_proofs=True)
+
+        # Get balance for the specific unit
+        unit_balance = state.balance_by_currency.get(send_unit, 0)
+
+        # Estimate fees (1% with minimum)
         estimated_fee_sats = max(amount * 0.01, 2)
-        if self.currency == "msat":
+        if send_unit == "msat":
             estimated_fee = estimated_fee_sats * 1000
         else:
             estimated_fee = estimated_fee_sats
 
-        if balance < amount + estimated_fee:
+        if unit_balance < amount + estimated_fee:
             raise WalletError(
-                f"Insufficient balance. Need at least {amount + estimated_fee} {self.currency} "
-                f"(amount: {amount} + estimated fees: {estimated_fee} {self.currency}), but have {balance}"
+                f"Insufficient balance. Need at least {amount + estimated_fee} {send_unit} "
+                f"(amount: {amount} + estimated fees: {estimated_fee} {send_unit}), but have {unit_balance}"
             )
 
         # Get LNURL data
         lnurl_data = await get_lnurl_data(lnurl)
 
         # Convert amounts based on currency
-        if self.currency == "sat":
+        if send_unit == "sat":
             amount_msat = amount * 1000
             min_sendable_sat = lnurl_data["min_sendable"] // 1000
             max_sendable_sat = lnurl_data["max_sendable"] // 1000
             unit_str = "sat"
-        elif self.currency == "msat":
+        elif send_unit == "msat":
             amount_msat = amount
             min_sendable_sat = lnurl_data["min_sendable"]
             max_sendable_sat = lnurl_data["max_sendable"]
             unit_str = "msat"
         else:
-            raise WalletError(f"Currency {self.currency} not supported for LNURL")
+            raise WalletError(f"Currency {send_unit} not supported for LNURL")
 
         # Check amount limits
         if not (
@@ -911,39 +1068,37 @@ class Wallet:
                 print(f"Warning: Failed to consolidate proofs for {mint_url}: {e}")
                 continue
 
-    def _calculate_optimal_denominations(self, amount: int) -> dict[int, int]:
+    def _calculate_optimal_denominations(
+        self, amount: int, keyset_id: str | None = None, mint_url: str | None = None
+    ) -> dict[int, int]:
         """Calculate optimal denomination breakdown for an amount.
 
-        Returns dict of denomination -> count.
+        Args:
+            amount: Amount to split into denominations
+            keyset_id: Specific keyset to use (optional)
+            mint_url: Mint URL to find keyset from (optional)
+
+        Returns:
+            Dict of denomination -> count
         """
-        denominations = {}
-        # Ensure we're working with an integer
-        remaining = int(amount)
+        from .denominations import DenominationSystem
 
-        # Use powers of 2 for optimal denomination
-        for denom in [
-            16384,
-            8192,
-            4096,
-            2048,
-            1024,
-            512,
-            256,
-            128,
-            64,
-            32,
-            16,
-            8,
-            4,
-            2,
-            1,
-        ]:
-            if remaining >= denom:
-                count = remaining // denom
-                denominations[denom] = int(count)  # Ensure count is always int
-                remaining -= denom * count
+        # Try to get keyset info for dynamic denominations
+        keyset_info = None
 
-        return denominations
+        if keyset_id:
+            keyset_info = self.keyset_manager.get_keyset(keyset_id)
+        elif mint_url:
+            # Find best keyset for the mint and currency
+            keyset_info = self.keyset_manager.find_keyset(mint_url, self.currency)
+
+        if keyset_info:
+            # Use dynamic denominations from keyset
+            available_denoms = DenominationSystem.get_keyset_denominations(keyset_info)
+            return DenominationSystem.calculate_optimal_split(amount, available_denoms)
+        else:
+            # Fallback to default powers of 2
+            return DenominationSystem._default_split(amount)
 
     async def _select_proofs(
         self, proofs: list[ProofDict], amount: int, target_mint: str
@@ -1156,7 +1311,10 @@ class Wallet:
                 blinding_factors.append(r_hex)
 
         # Perform swap
-        swap_resp = await mint.swap(inputs=mint_proofs, outputs=outputs)
+        # Cast to ProofComplete since swap expects it (ProofComplete extends Proof with optional fields)
+        swap_resp = await mint.swap(
+            inputs=cast(list[ProofComplete], mint_proofs), outputs=outputs
+        )
 
         # Get mint keys for unblinding
         keys_resp = await mint.get_keys(keyset_id)
@@ -1796,6 +1954,48 @@ class Wallet:
             self.mints[mint_url] = Mint(mint_url, client=self.mint_client)
         return self.mints[mint_url]
 
+    async def _update_keysets_from_mint(self, mint_url: str) -> None:
+        """Fetch and update keysets from a mint."""
+        mint = self._get_mint(mint_url)
+
+        try:
+            # Get all keysets from the mint
+            keysets_resp = await mint.get_keysets()
+            keysets = keysets_resp.get("keysets", [])
+
+            for keyset_data in keysets:
+                keyset_id = str(keyset_data.get("id", ""))
+                if not keyset_id:
+                    continue
+
+                # Get detailed keys for this keyset
+                keys_resp = await mint.get_keys(keyset_id)
+                keys_data = {}
+
+                for ks in keys_resp.get("keysets", []):
+                    if str(ks.get("id")) == keyset_id:
+                        keys_data = ks.get("keys", {})
+                        break
+
+                # Create KeysetInfo and add to manager
+                # Get unit and cast to CurrencyUnit type
+                unit_str = keyset_data.get("unit", "sat")
+                unit: CurrencyUnit = cast(CurrencyUnit, unit_str)
+
+                keyset_info = KeysetInfo(
+                    id=keyset_id,
+                    mint_url=mint_url,
+                    unit=unit,
+                    active=keyset_data.get("active", True),
+                    input_fee_ppk=keyset_data.get("input_fee_ppk", 0),
+                    keys=keys_data if isinstance(keys_data, dict) else {},
+                )
+
+                self.keyset_manager.add_keyset(keyset_info)
+
+        except Exception as e:
+            print(f"Warning: Failed to update keysets from {mint_url}: {e}")
+
     def _serialize_proofs_for_token(
         self, proofs: list[ProofDict], mint_url: str, token_version: int
     ) -> str:
@@ -2072,7 +2272,7 @@ class Wallet:
 
     async def fetch_wallet_state(
         self, *, check_proofs: bool = True, check_local_backups: bool = True
-    ) -> WalletState:
+    ) -> EnhancedWalletState:
         """Fetch wallet, token events and compute balance.
 
         Args:
@@ -2263,9 +2463,6 @@ class Wallet:
             # Add back pending proofs (assume they're valid)
             all_proofs = validated_proofs + pending_proofs
 
-        # Calculate balance
-        balance = sum(p["amount"] for p in all_proofs)
-
         # Fetch mint keysets
         mint_keysets: dict[str, list[dict[str, str]]] = {}
         for mint_url in self.mint_urls:
@@ -2306,11 +2503,8 @@ class Wallet:
 
                 if not should_check:
                     # Skip backup check if we just did it
-                    return WalletState(
-                        balance=balance,
-                        proofs=all_proofs,
-                        mint_keysets=mint_keysets,
-                        proof_to_event_id=proof_to_event_id,
+                    return await self._build_enhanced_wallet_state(
+                        all_proofs, mint_keysets, proof_to_event_id
                     )
                 # Check if we have any backup files with missing proofs
                 existing_proof_ids = set(f"{p['secret']}:{p['C']}" for p in all_proofs)
@@ -2365,11 +2559,8 @@ class Wallet:
                         )
                         await self._cleanup_spent_proof_backups()
 
-        return WalletState(
-            balance=balance,
-            proofs=all_proofs,
-            mint_keysets=mint_keysets,
-            proof_to_event_id=proof_to_event_id,
+        return await self._build_enhanced_wallet_state(
+            all_proofs, mint_keysets, proof_to_event_id
         )
 
     async def get_balance(self, *, check_proofs: bool = True) -> int:
@@ -2580,6 +2771,62 @@ class Wallet:
     def _get_pubkey(self) -> str:
         """Get the Nostr public key for this wallet."""
         return get_pubkey(self._privkey)
+
+    async def _build_enhanced_wallet_state(
+        self,
+        all_proofs: list[ProofDict],
+        mint_keysets: dict[str, list[dict[str, str]]],
+        proof_to_event_id: dict[str, str] | None,
+    ) -> EnhancedWalletState:
+        """Build enhanced wallet state from proofs and keysets."""
+        # Update keyset manager with latest data from mints
+        for mint_url in self.mint_urls:
+            if not self.keyset_manager.is_cached(f"{mint_url}:check"):
+                await self._update_keysets_from_mint(mint_url)
+                # Mark as checked (simple cache mechanism)
+                self.keyset_manager._cache_timestamps[f"{mint_url}:check"] = time.time()
+
+        # Calculate balance by keyset and currency
+        balance_by_keyset: dict[str, int] = {}
+        balance_by_currency: dict[CurrencyUnit, int] = {}
+        keysets: dict[str, KeysetInfo] = {}
+
+        # Get all keysets from the manager
+        for keyset_id, keyset_info in self.keyset_manager.keysets.items():
+            keysets[keyset_id] = keyset_info
+
+        # Calculate balances
+        for proof in all_proofs:
+            keyset_id = proof["id"]
+            amount = proof["amount"]
+
+            # Update keyset balance
+            if keyset_id not in balance_by_keyset:
+                balance_by_keyset[keyset_id] = 0
+            balance_by_keyset[keyset_id] += amount
+
+            # Get keyset info to determine currency
+            proof_keyset_info: KeysetInfo | None = self.keyset_manager.get_keyset(
+                keyset_id
+            )
+            if proof_keyset_info:
+                currency = proof_keyset_info.unit
+            else:
+                # Fallback to wallet currency if keyset not found
+                currency = self.currency
+
+            # Update currency balance
+            if currency not in balance_by_currency:
+                balance_by_currency[currency] = 0
+            balance_by_currency[currency] += amount
+
+        return EnhancedWalletState(
+            balance_by_keyset=balance_by_keyset,
+            balance_by_currency=balance_by_currency,
+            proofs=all_proofs,
+            keysets=keysets,
+            proof_to_event_id=proof_to_event_id,
+        )
 
     async def check_wallet_event_exists(self) -> tuple[bool, NostrEvent | None]:
         """Check if a wallet event already exists for this wallet.

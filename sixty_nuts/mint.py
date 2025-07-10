@@ -2,32 +2,22 @@
 
 from __future__ import annotations
 
-from typing import TypedDict, cast, Any, Literal
+from typing import TypedDict, cast, Any
 
 import httpx
 
-from .crypto import BlindedMessage, BlindSignature as BlindedSignature, Proof
+from .types import (
+    BlindedMessage,
+    BlindedSignature,
+    Proof,
+    CurrencyUnit,
+    MintError,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Type definitions based on NUT-01 and OpenAPI spec
 # ──────────────────────────────────────────────────────────────────────────────
-
-# NUT-01 compliant currency units
-CurrencyUnit = Literal[
-    "btc",
-    "sat",
-    "msat",  # Bitcoin units
-    "usd",
-    "eur",
-    "gbp",
-    "jpy",  # Major fiat (ISO 4217)
-    "auth",  # Authentication unit
-    # Add more ISO 4217 codes and stablecoin units as needed
-    "usdt",
-    "usdc",
-    "dai",  # Common stablecoins
-]
 
 
 class ProofOptional(TypedDict, total=False):
@@ -215,10 +205,6 @@ class PostRestoreResponse(TypedDict, total=False):
 # ──────────────────────────────────────────────────────────────────────────────
 # Mint API client
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-class MintError(Exception):
-    """Raised when mint returns an error response."""
 
 
 class InvalidKeysetError(MintError):
