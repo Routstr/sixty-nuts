@@ -48,11 +48,14 @@ async def add_new_mint(wallet: Wallet, mint_url: str):
     print(f"\n➕ Adding new mint: {mint_url}")
 
     if mint_url not in wallet.mint_urls:
-        wallet.mint_urls.add(mint_url)
+        wallet.mint_urls.append(mint_url)
 
         # Update wallet event with new mint
         try:
-            await wallet.initialize_wallet(force=True)
+            # Need to provide wallet_privkey to update the wallet event
+            # For this example, we'll use a placeholder key
+            wallet_privkey = "placeholder_wallet_privkey"
+            await wallet.event_manager.update_wallet_event(wallet_privkey)
             print("✅ Mint added and wallet updated")
         except Exception as e:
             print(f"⚠️  Mint added locally but failed to update wallet event: {e}")

@@ -20,10 +20,17 @@ async def demonstrate_recovery(nsec: str):
     async with Wallet(nsec=nsec) as wallet:
         print("✅ Wallet created and connected to relays")
 
-        # Check if wallet events exist
-        exists, wallet_event = await wallet.check_wallet_event_exists()
+        # Fetch all wallet events to check if configuration exists
+        from sixty_nuts.relay import EventKind
+        from sixty_nuts.crypto import get_pubkey
 
-        if exists and wallet_event:
+        pubkey = get_pubkey(wallet._privkey)
+        all_events = await wallet.relay_manager.fetch_wallet_events(pubkey)
+        wallet_events = [e for e in all_events if e["kind"] == EventKind.Wallet]
+
+        if wallet_events:
+            # Get the newest wallet event
+            wallet_event = max(wallet_events, key=lambda e: e["created_at"])
             from datetime import datetime
 
             created_time = datetime.fromtimestamp(wallet_event["created_at"])
@@ -38,8 +45,8 @@ async def demonstrate_recovery(nsec: str):
         for i, mint_url in enumerate(wallet.mint_urls, 1):
             print(f"   {i}. {mint_url}")
 
-        print(f"   Relays: {len(wallet.relays)}")
-        for i, relay_url in enumerate(wallet.relays, 1):
+        print(f"   Relays: {len(wallet.relay_urls)}")
+        for i, relay_url in enumerate(wallet.relay_urls, 1):
             print(f"   {i}. {relay_url}")
 
         # Show recovered balance and proofs

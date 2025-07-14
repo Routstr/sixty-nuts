@@ -57,8 +57,8 @@ async def demonstrate_queued_operations(wallet: Wallet):
 async def show_relay_status(wallet: Wallet):
     """Show current relay configuration and status."""
     print("\n🌐 Relay Configuration:")
-    print(f"   Configured relays: {len(wallet.relays)}")
-    for i, relay in enumerate(wallet.relays, 1):
+    print(f"   Configured relays: {len(wallet.relay_urls)}")
+    for i, relay in enumerate(wallet.relay_urls, 1):
         print(f"   {i}. {relay}")
 
     print(
