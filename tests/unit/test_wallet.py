@@ -12,7 +12,7 @@ from unittest.mock import patch, AsyncMock
 class TestWalletFeeCalculation:
     """Test fee calculation logic."""
 
-    def test_fee_calculation_empty_proofs(self):
+    def test_fee_calculation_empty_proofs(self) -> None:
         """Test fee calculation with empty proofs."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -23,7 +23,7 @@ class TestWalletFeeCalculation:
         fees = wallet.calculate_input_fees([], {"input_fee_ppk": 1000})
         assert fees == 0
 
-    def test_fee_calculation_with_proofs(self):
+    def test_fee_calculation_with_proofs(self) -> None:
         """Test fee calculation with mock proofs."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -60,7 +60,7 @@ class TestWalletFeeCalculation:
         fees_no_fee = wallet.calculate_input_fees(mock_proofs, keyset_info_no_fee)
         assert fees_no_fee == 0
 
-    def test_fee_calculation_fractional(self):
+    def test_fee_calculation_fractional(self) -> None:
         """Test fee calculation with fractional fees."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -91,7 +91,7 @@ class TestWalletFeeCalculation:
         fees = wallet.calculate_input_fees(mock_proofs, keyset_info)
         assert fees == 2  # Should round up to 2
 
-    def test_estimate_transaction_fees(self):
+    def test_estimate_transaction_fees(self) -> None:
         """Test transaction fee estimation."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -132,7 +132,7 @@ class TestWalletFeeCalculation:
 class TestWalletTokenSerialization:
     """Test token serialization and parsing logic."""
 
-    def test_token_serialization_v3(self):
+    def test_token_serialization_v3(self) -> None:
         """Test V3 token serialization."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -154,7 +154,7 @@ class TestWalletTokenSerialization:
         token_v3 = wallet._serialize_proofs_v3(sample_proofs, "http://test.mint", "sat")
         assert token_v3.startswith("cashuA"), "V3 tokens should start with cashuA"
 
-    def test_token_serialization_v4(self):
+    def test_token_serialization_v4(self) -> None:
         """Test V4 token serialization."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -176,7 +176,7 @@ class TestWalletTokenSerialization:
         token_v4 = wallet._serialize_proofs_v4(sample_proofs, "http://test.mint", "sat")
         assert token_v4.startswith("cashuB"), "V4 tokens should start with cashuB"
 
-    def test_token_roundtrip_v3(self):
+    def test_token_roundtrip_v3(self) -> None:
         """Test V3 token serialization and parsing roundtrip."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -206,7 +206,7 @@ class TestWalletTokenSerialization:
         assert len(parsed_proofs) == 1
         assert parsed_proofs[0]["amount"] == 10
 
-    def test_token_roundtrip_v4(self):
+    def test_token_roundtrip_v4(self) -> None:
         """Test V4 token serialization and parsing roundtrip."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -236,7 +236,7 @@ class TestWalletTokenSerialization:
         assert len(parsed_proofs) == 1
         assert parsed_proofs[0]["amount"] == 10
 
-    def test_parse_invalid_tokens(self):
+    def test_parse_invalid_tokens(self) -> None:
         """Test parsing invalid tokens raises appropriate errors."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -257,7 +257,7 @@ class TestWalletTokenSerialization:
 class TestWalletVersionValidation:
     """Test version validation logic."""
 
-    def test_send_token_invalid_version(self):
+    def test_send_token_invalid_version(self) -> None:
         """Test error handling for invalid token versions."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -277,7 +277,7 @@ class TestWalletVersionValidation:
 class TestWalletCurrencyValidation:
     """Test currency unit validation."""
 
-    def test_valid_currency_units(self):
+    def test_valid_currency_units(self) -> None:
         """Test that valid currency units are accepted."""
         from sixty_nuts.types import CurrencyUnit
 
@@ -291,7 +291,7 @@ class TestWalletCurrencyValidation:
             )
             wallet._validate_currency_unit(unit)
 
-    def test_invalid_currency_unit(self):
+    def test_invalid_currency_unit(self) -> None:
         """Test invalid currency unit handling."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -307,7 +307,7 @@ class TestWalletOptimalDenominations:
     """Test optimal denomination calculation logic."""
 
     @pytest.mark.asyncio
-    async def test_calculate_optimal_denominations_small(self):
+    async def test_calculate_optimal_denominations_small(self) -> None:
         wallet = Wallet(
             nsec=generate_privkey(),
             mint_urls=["http://test.mint"],
@@ -339,7 +339,7 @@ class TestWalletOptimalDenominations:
                 assert denoms == {4: 1, 2: 1, 1: 1}
 
     @pytest.mark.asyncio
-    async def test_calculate_optimal_denominations_large(self):
+    async def test_calculate_optimal_denominations_large(self) -> None:
         wallet = Wallet(
             nsec=generate_privkey(),
             mint_urls=["http://test.mint"],
@@ -365,7 +365,7 @@ class TestWalletOptimalDenominations:
                 assert total == 1000
 
     @pytest.mark.asyncio
-    async def test_calculate_optimal_denominations_zero(self):
+    async def test_calculate_optimal_denominations_zero(self) -> None:
         wallet = Wallet(
             nsec=generate_privkey(),
             mint_urls=["http://test.mint"],
@@ -390,7 +390,7 @@ class TestWalletOptimalDenominations:
 class TestWalletInsufficientBalanceCheck:
     """Test insufficient balance validation logic."""
 
-    def test_raise_if_insufficient_balance_sufficient(self):
+    def test_raise_if_insufficient_balance_sufficient(self) -> None:
         """Test that sufficient balance doesn't raise error."""
         wallet = Wallet(
             nsec=generate_privkey(),
@@ -402,7 +402,7 @@ class TestWalletInsufficientBalanceCheck:
         wallet.raise_if_insufficient_balance(100, 50)
         wallet.raise_if_insufficient_balance(100, 100)
 
-    def test_raise_if_insufficient_balance_insufficient(self):
+    def test_raise_if_insufficient_balance_insufficient(self) -> None:
         """Test that insufficient balance raises WalletError."""
         from sixty_nuts.types import WalletError
 
