@@ -4,13 +4,13 @@
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
-from sixty_nuts.relay import NostrRelay, RelayError, NostrEvent, NostrFilter
+from sixty_nuts.relay import Relay, RelayError, NostrEvent, NostrFilter
 
 
 @pytest.fixture
 async def relay():
     """Create a relay instance for testing."""
-    relay = NostrRelay("wss://relay.test.com")
+    relay = Relay("wss://relay.test.com")
     yield relay
     if relay.ws and not relay.ws.closed:
         await relay.disconnect()
@@ -25,12 +25,12 @@ def mock_websocket():
     return ws
 
 
-class TestNostrRelay:
-    """Test cases for NostrRelay class."""
+class TestRelay:
+    """Test cases for Relay class."""
 
     async def test_relay_initialization(self):
         """Test relay initialization."""
-        relay = NostrRelay("wss://relay.test.com")
+        relay = Relay("wss://relay.test.com")
         assert relay.url == "wss://relay.test.com"
         assert relay.ws is None
         assert relay.subscriptions == {}
@@ -48,7 +48,7 @@ class TestNostrRelay:
 
         mock_connect.side_effect = async_connect
 
-        relay = NostrRelay("wss://relay.test.com")
+        relay = Relay("wss://relay.test.com")
         await relay.connect()
 
         assert relay.ws == mock_ws
@@ -138,7 +138,7 @@ class TestNostrRelay:
 
         mock_connect.side_effect = async_connect
 
-        relay = NostrRelay("wss://relay.test.com")
+        relay = Relay("wss://relay.test.com")
 
         # Mock the response sequence
         event1 = {
@@ -298,7 +298,7 @@ class TestNostrRelay:
 @pytest.mark.asyncio
 async def test_relay_lifecycle():
     """Test the full lifecycle of relay operations."""
-    relay = NostrRelay("wss://relay.test.com")
+    relay = Relay("wss://relay.test.com")
 
     # Can't actually connect without a real relay
     # Just test that the object is created properly

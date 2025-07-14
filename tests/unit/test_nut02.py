@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, Mock
 from typing import cast
 
 from sixty_nuts.crypto import derive_keyset_id, validate_keyset_id
-from sixty_nuts.mint import Mint, MintError
+from sixty_nuts.mint import Mint
 from sixty_nuts.temp import TempWallet
-from sixty_nuts.wallet import ProofDict
+from sixty_nuts.wallet import Proof
 
 
 class TestKeysetIDDerivation:
@@ -87,7 +87,7 @@ class TestFeeCalculation:
         """Test fee calculation with zero fee rate."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -114,7 +114,7 @@ class TestFeeCalculation:
         """Test fee calculation with positive fee rate."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -150,7 +150,7 @@ class TestFeeCalculation:
         """Test fee calculation with fractional fees."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -179,7 +179,7 @@ class TestFeeCalculation:
         """Test fee calculation with string fee value."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -201,7 +201,7 @@ class TestFeeCalculation:
         """Test fee calculation with invalid fee value."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -222,7 +222,7 @@ class TestFeeCalculation:
         """Test total transaction fee estimation."""
         wallet = TempWallet()
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -375,10 +375,8 @@ class TestKeysetIntegration:
     """Test integration of keyset and fee functionality."""
 
     async def test_get_validated_keysets_success(self):
-        """Test successful keyset validation."""
         mint = Mint("https://test.mint")
 
-        # Mock valid response
         mock_response = {
             "keysets": [
                 {
@@ -389,43 +387,35 @@ class TestKeysetIntegration:
                 }
             ]
         }
-        mint.get_keysets = AsyncMock(return_value=mock_response)
+        mint.get_keysets_info = AsyncMock(return_value=mock_response["keysets"])
 
-        result = await mint.get_validated_keysets()
-        assert result == mock_response
+        result = await mint.get_keysets_info()
+        assert mint.validate_keysets_response(mock_response)
+        assert result == mock_response["keysets"]
 
     async def test_get_validated_keysets_failure(self):
-        """Test keyset validation failure."""
         mint = Mint("https://test.mint")
 
-        # Mock invalid response
-        mock_response = {
-            "keysets": [
-                {"id": "invalid", "unit": "sat", "active": True}  # Invalid ID
-            ]
-        }
-        mint.get_keysets = AsyncMock(return_value=mock_response)
+        mock_response = {"keysets": [{"id": "invalid", "unit": "sat", "active": True}]}
+        mint.get_keysets_info = AsyncMock(return_value=mock_response["keysets"])
 
-        with pytest.raises(MintError, match="Invalid keysets response"):
-            await mint.get_validated_keysets()
+        result = await mint.get_keysets_info()
+        assert not mint.validate_keysets_response(mock_response)
+        assert result == mock_response["keysets"]
 
     async def test_calculate_total_input_fees_success(self):
-        """Test successful total input fee calculation."""
         wallet = TempWallet()
 
-        # Mock mint and keysets response
         mint = Mock()
-        mint.get_keysets = AsyncMock(
-            return_value={
-                "keysets": [
-                    {"id": "keyset1", "input_fee_ppk": 1000},
-                    {"id": "keyset2", "input_fee_ppk": 2000},
-                ]
-            }
+        mint.get_keysets_info = AsyncMock(
+            return_value=[
+                {"id": "keyset1", "input_fee_ppk": 1000},
+                {"id": "keyset2", "input_fee_ppk": 2000},
+            ]
         )
 
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
@@ -452,9 +442,6 @@ class TestKeysetIntegration:
         )
 
         total_fee = await wallet.calculate_total_input_fees(mint, proofs)
-        # keyset1: 2 proofs * 1000 ppk / 1000 = 2 sats
-        # keyset2: 1 proof * 2000 ppk / 1000 = 2 sats
-        # total: 4 sats
         assert total_fee == 4
 
     async def test_calculate_total_input_fees_failure(self):
@@ -463,10 +450,10 @@ class TestKeysetIntegration:
 
         # Mock mint that raises exception
         mint = Mock()
-        mint.get_keysets = AsyncMock(side_effect=Exception("Mint error"))
+        mint.get_keysets_info = AsyncMock(side_effect=Exception("Mint error"))
 
         proofs = cast(
-            list[ProofDict],
+            list[Proof],
             [
                 {
                     "id": "keyset1",
