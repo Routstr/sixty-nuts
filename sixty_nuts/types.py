@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, TypedDict
 
 
-class ProofDict(TypedDict):
+class Proof(TypedDict):
     """Extended proof structure for NIP-60 wallet use.
 
     Extends the basic Proof with mint URL tracking for multi-mint support.
@@ -17,7 +17,7 @@ class ProofDict(TypedDict):
     secret: str
     C: str
     mint: str
-    unit: NotRequired[CurrencyUnit]  # currency unit for this proof
+    unit: CurrencyUnit
 
 
 class WalletError(Exception):
@@ -63,15 +63,6 @@ CurrencyUnit = Literal[
     "usdc",  # USD Coin
     "dai",  # DAI Stablecoin
 ]
-
-
-class Proof(TypedDict):
-    """Proof format for mint API communication (NUT-00 compliant)."""
-
-    id: str  # keyset ID
-    amount: int
-    secret: str  # hex encoded secret
-    C: str  # hex encoded signature
 
 
 class BlindedMessage(TypedDict):
@@ -130,21 +121,31 @@ EventDict = dict[str, Any]  # Generic Nostr event dictionary
 
 
 @dataclass
-class EnhancedWalletState:
-    """Enhanced wallet state with keyset tracking."""
+class WalletState:
+    """Wallet state with balance tracking."""
 
-    balance_by_keyset: dict[str, int]  # keyset_id -> balance
-    balance_by_currency: dict[CurrencyUnit, int]  # currency -> balance
-    proofs: list[ProofDict]
-    keysets: dict[str, KeysetInfo]  # keyset_id -> KeysetInfo
+    proofs: list[Proof]
     proof_to_event_id: dict[str, str] | None = None
+
+    @property
+    def balance_by_mint(self) -> dict[str, int]:
+        return {p["mint"]: p["amount"] for p in self.proofs}
+
+    @property
+    def balance_by_unit(self) -> dict[CurrencyUnit, int]:
+        """Get total balance grouped by currency unit."""
+        balances: dict[CurrencyUnit, int] = {}
+        for proof in self.proofs:
+            unit = proof["unit"]
+            balances[unit] = balances.get(unit, 0) + proof["amount"]
+        return balances
 
     @property
     def total_balance_sat(self) -> int:
         """Get total balance in satoshis (only BTC-based currencies)."""
         total = 0
 
-        for unit, balance in self.balance_by_currency.items():
+        for unit, balance in self.balance_by_unit.items():
             if unit == "sat":
                 total += balance
             elif unit == "msat":
@@ -160,9 +161,9 @@ class EnhancedWalletState:
         return self.total_balance_sat
 
     @property
-    def proofs_by_keyset(self) -> dict[str, list[ProofDict]]:
+    def proofs_by_keyset(self) -> dict[str, list[Proof]]:
         """Group proofs by keyset ID."""
-        grouped: dict[str, list[ProofDict]] = {}
+        grouped: dict[str, list[Proof]] = {}
         for proof in self.proofs:
             keyset_id = proof["id"]
             if keyset_id not in grouped:
@@ -171,20 +172,15 @@ class EnhancedWalletState:
         return grouped
 
     @property
-    def proofs_by_mint(self) -> dict[str, list[ProofDict]]:
+    def proofs_by_mint(self) -> dict[str, list[Proof]]:
         """Group proofs by mint URL."""
-        grouped: dict[str, list[ProofDict]] = {}
+        grouped: dict[str, list[Proof]] = {}
         for proof in self.proofs:
             mint_url = proof["mint"]
             if mint_url not in grouped:
                 grouped[mint_url] = []
             grouped[mint_url].append(proof)
         return grouped
-
-    @property
-    def proofs_by_mints(self) -> dict[str, list[ProofDict]]:
-        """Group proofs by mint URL (backward compatibility alias)."""
-        return self.proofs_by_mint
 
     @property
     def mint_balances(self) -> dict[str, int]:

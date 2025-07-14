@@ -132,7 +132,7 @@ async def discover_relays_from_nip65(
             print(f"   Trying bootstrap relay: {bootstrap_url}")
 
         try:
-            relay = NostrRelay(bootstrap_url)
+            relay = Relay(bootstrap_url)
             await relay.connect()
 
             # Fetch NIP-65 relay list events (kind 10002)
@@ -223,7 +223,7 @@ async def publish_relay_list_nip65(relays: list[str], privkey: PrivateKey) -> bo
 
     for bootstrap_url in BOOTSTRAP_RELAYS:
         try:
-            relay_client = NostrRelay(bootstrap_url)
+            relay_client = Relay(bootstrap_url)
             await relay_client.connect()
 
             from typing import cast
@@ -736,7 +736,7 @@ class EventQueue:
         return len(self._queue)
 
 
-class NostrRelay:
+class Relay:
     """Minimal Nostr relay client for NIP-60 wallet operations."""
 
     def __init__(self, url: str) -> None:
@@ -983,7 +983,7 @@ class NostrRelay:
         return relays
 
 
-class QueuedNostrRelay(NostrRelay):
+class QueuedRelay(Relay):
     """Nostr relay client with event queuing and batching support."""
 
     def __init__(
@@ -1137,21 +1137,21 @@ class QueuedNostrRelay(NostrRelay):
 
 
 class RelayPool:
-    """Pool of QueuedNostrRelay instances with shared queue."""
+    """Pool of QueuedRelay instances with shared queue."""
 
     def __init__(self, urls: list[str], **relay_kwargs: Any) -> None:
         """Initialize relay pool with shared queue.
 
         Args:
             urls: List of relay URLs
-            **relay_kwargs: Arguments passed to QueuedNostrRelay
+            **relay_kwargs: Arguments passed to QueuedRelay
         """
-        self.relays: list[QueuedNostrRelay] = []
+        self.relays: list[QueuedRelay] = []
         self.shared_queue = EventQueue()
 
         # Create relays with shared queue
         for url in urls:
-            relay = QueuedNostrRelay(url, **relay_kwargs)
+            relay = QueuedRelay(url, **relay_kwargs)
             # Replace individual queue with shared one
             relay.queue = self.shared_queue
             self.relays.append(relay)
@@ -1198,7 +1198,7 @@ def create_event(
     }
 
 
-class RelayManager:
+class RelayClient:
     """Manages relay connections, discovery, and publishing for NIP-60 wallets."""
 
     def __init__(
@@ -1223,13 +1223,13 @@ class RelayManager:
         self.min_relay_interval = min_relay_interval
 
         # Relay instances
-        self.relay_instances: list[NostrRelay | QueuedNostrRelay] = []
+        self.relay_instances: list[Relay | QueuedRelay] = []
         self.relay_pool: RelayPool | None = None
 
         # Rate limiting
         self._last_relay_operation = 0.0
 
-    async def get_relay_connections(self) -> list[NostrRelay]:
+    async def get_relay_connections(self) -> list[Relay]:
         """Get relay connections, discovering if needed."""
         # If no relay URLs are configured, try to discover them
         if not self.relay_urls:
@@ -1264,7 +1264,7 @@ class RelayManager:
             from typing import cast
 
             self.relay_instances = cast(
-                list[NostrRelay | QueuedNostrRelay], self.relay_pool.relays
+                list[Relay | QueuedRelay], self.relay_pool.relays
             )
 
         elif not self.use_queued_relays and not self.relay_instances:
@@ -1280,7 +1280,7 @@ class RelayManager:
             # Try to connect to relays
             for url in self.relay_urls[:5]:  # Try up to 5 relays
                 try:
-                    relay = NostrRelay(url)
+                    relay = Relay(url)
                     await relay.connect()
                     self.relay_instances.append(relay)
 
