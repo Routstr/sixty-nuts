@@ -1969,7 +1969,9 @@ class Wallet:
 
         return WalletState(proofs=all_proofs, proof_to_event_id=proof_to_event_id)
 
-    async def get_balance(self, *, check_proofs: bool = True) -> int:
+    async def get_balance(
+        self, unit: CurrencyUnit | None = None, *, check_proofs: bool = True
+    ) -> int:
         """Get current wallet balance.
 
         Args:
@@ -1985,7 +1987,11 @@ class Wallet:
         state = await self.fetch_wallet_state(
             check_proofs=check_proofs, check_local_backups=True
         )
-        return state.balance
+        if unit:
+            if unit not in state.balance_by_unit:
+                raise WalletError(f"Unsupported currency unit: {unit}")
+            return state.balance_by_unit[unit]
+        return state.total_balance_sat
 
     async def get_balance_by_mint(self, mint_url: str) -> int:
         """Get balance for a specific mint."""
@@ -2007,7 +2013,7 @@ class Wallet:
 
     # ───────────────────────── Async context manager ──────────────────────────
 
-    async def __aenter__(self) -> "Wallet":
+    async def __aenter__(self) -> Wallet:
         """Enter async context and connect to relays without auto-creating wallet events."""
         # Discover relays if none are set
         if not self.relay_urls:
@@ -2290,7 +2296,9 @@ class Wallet:
         unit_proofs = [p for p in proofs if p.get("unit") == unit]
 
         if not unit_proofs:
-            raise WalletError(f"No {unit.upper()} balance available")
+            raise WalletError(
+                f"Insufficient {unit.upper()} balance: No {unit.upper()} balance available"
+            )
 
         # Calculate balances per mint for this unit
         mint_unit_balances: dict[str, int] = {}

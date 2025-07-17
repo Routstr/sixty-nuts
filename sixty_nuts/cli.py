@@ -1891,10 +1891,10 @@ def relays(
             for i, relay_url in enumerate(test_relays, 1):
                 console.print(f"  {i}. Testing {relay_url}...")
                 try:
-                    relay = Relay(relay_url)
-                    await relay.connect()
+                    relay_client = Relay(relay_url)
+                    await relay_client.connect()
                     console.print("     [green]✅ Connected successfully[/green]")
-                    await relay.disconnect()
+                    await relay_client.disconnect()
                 except Exception as e:
                     console.print(f"     [red]❌ Failed: {e}[/red]")
 
@@ -2425,7 +2425,7 @@ def cleanup(
     superseded, making it work even on relays that don't support deletion events.
     """
 
-    async def _cleanup():
+    async def _cleanup() -> dict | None:
         try:
             nsec = get_nsec()
             # Use create_wallet_with_mint_selection for automatic mint discovery and selection
@@ -2479,7 +2479,7 @@ def cleanup(
 
                     if confirm_cleanup != "yes":
                         console.print("[yellow]❌ Cleanup cancelled[/yellow]")
-                        return
+                        return None
 
                 # Perform cleanup
                 print("🧹 Starting wallet state cleanup...")
@@ -2514,7 +2514,7 @@ def cleanup(
                     except Exception:
                         undecryptable_events.append(event["id"])
 
-                stats = {
+                stats: dict = {
                     "total_events": len(token_events),
                     "valid_events": len(valid_events),
                     "undecryptable_events": len(undecryptable_events),
@@ -2652,8 +2652,9 @@ def cleanup(
 
                 # Show balance by currency
                 console.print("   Balance by currency:")
-                for currency, balance in sorted(stats["balance_by_unit"].items()):
-                    if currency in [
+                balance_by_unit = cast(dict[str, int], stats["balance_by_unit"])
+                for currency_str, balance in sorted(balance_by_unit.items()):
+                    if currency_str in [
                         "usd",
                         "eur",
                         "gbp",
@@ -2669,10 +2670,12 @@ def cleanup(
                     ]:
                         display_balance = balance / 100
                         console.print(
-                            f"     {currency.upper()}: {display_balance:.2f} {currency}"
+                            f"     {currency_str.upper()}: {display_balance:.2f} {currency_str}"
                         )
                     else:
-                        console.print(f"     {currency.upper()}: {balance} {currency}")
+                        console.print(
+                            f"     {currency_str.upper()}: {balance} {currency_str}"
+                        )
 
                 if not dry_run:
                     console.print(
@@ -2697,13 +2700,18 @@ def cleanup(
                     console.print(
                         "\n[cyan]ℹ️  This was a dry run - no changes were made.[/cyan]"
                     )
-                    if stats["undecryptable_events"] + stats["empty_events"] >= 5:
+                    if (
+                        cast(int, stats["undecryptable_events"])
+                        + cast(int, stats["empty_events"])
+                        >= 5
+                    ):
                         console.print(
                             "[yellow]Run without --dry-run to perform actual cleanup.[/yellow]"
                         )
 
         except Exception as e:
             handle_wallet_error(e)
+        return None
 
     asyncio.run(_cleanup())
 
@@ -2735,7 +2743,7 @@ def backup(
     Use --scan to check for missing proofs and --recover to restore them.
     """
 
-    async def _backup():
+    async def _backup() -> None:
         nsec = get_nsec()
         async with await create_wallet_with_mint_selection(
             nsec, mint_urls=mint_urls
@@ -2778,7 +2786,7 @@ def backup(
 
                         with open(bf, "r") as f:
                             data = json.load(f)
-                        proof_count = len(data.get("proofs", []))
+                        proof_count: int | str = len(data.get("proofs", []))
                     except Exception:
                         proof_count = "?"
 
@@ -3256,7 +3264,7 @@ def debug(
             except Exception as e:
                 console.print(f"    {relay_conn.url}: ❌ Error: {e}")
 
-    async def _debug_balance_proofs(wallet_obj):
+    async def _debug_balance_proofs(wallet_obj: Wallet) -> None:
         """Debug balance calculation and proof validation."""
         console.print("\n[yellow]💰 Balance & Proof Validation[/yellow]")
 
@@ -3364,7 +3372,7 @@ def debug(
                 console.print("\n  Proof Breakdown by Mint and Currency:")
 
                 # Group proofs by mint and currency
-                proofs_by_mint_currency: dict[str, dict[str, list]] = {}
+                proofs_by_mint_currency: dict[str, dict[CurrencyUnit, list]] = {}
                 for proof in state_validated.proofs:
                     mint_url = proof.get("mint", "unknown")
                     currency = proof.get("unit", "sat")
@@ -3382,11 +3390,11 @@ def debug(
                     )
                     console.print(f"    {mint_display}:")
 
-                    for currency, proofs in sorted(currency_proofs.items()):
+                    for currency, proofs in sorted(currency_proofs.items()):  # type: ignore
                         balance = sum(p["amount"] for p in proofs)
 
                         # Group by denomination
-                        denominations = {}
+                        denominations: dict[int, int] = {}
                         for proof in proofs:
                             amount = proof["amount"]
                             denominations[amount] = denominations.get(amount, 0) + 1

@@ -3,7 +3,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, Mock
-from typing import cast
+from typing import cast, Any
 
 from sixty_nuts.crypto import derive_keyset_id, validate_keyset_id
 from sixty_nuts.mint import Mint
@@ -357,7 +357,7 @@ class TestKeysetValidation:
         mint = Mint("https://test.mint")
 
         # Missing keysets field
-        response1 = {}
+        response1: dict[str, Any] = {}
         assert not mint.validate_keysets_response(response1)
 
         # Invalid keyset in list
@@ -387,7 +387,9 @@ class TestKeysetIntegration:
                 }
             ]
         }
-        mint.get_keysets_info = AsyncMock(return_value=mock_response["keysets"])
+        setattr(
+            mint, "get_keysets_info", AsyncMock(return_value=mock_response["keysets"])
+        )
 
         result = await mint.get_keysets_info()
         assert mint.validate_keysets_response(mock_response)
@@ -397,7 +399,9 @@ class TestKeysetIntegration:
         mint = Mint("https://test.mint")
 
         mock_response = {"keysets": [{"id": "invalid", "unit": "sat", "active": True}]}
-        mint.get_keysets_info = AsyncMock(return_value=mock_response["keysets"])
+        setattr(
+            mint, "get_keysets_info", AsyncMock(return_value=mock_response["keysets"])
+        )
 
         result = await mint.get_keysets_info()
         assert not mint.validate_keysets_response(mock_response)
