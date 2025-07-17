@@ -400,7 +400,7 @@ class TestWalletRelayOperations:
     async def test_relay_connections(self, wallet: Wallet) -> None:
         """Test relay connection establishment."""
         # Wallet should have relay connections from initialization
-        assert len(getattr(wallet, "relays", [])) > 0
+        assert len(getattr(wallet, "relay_urls", [])) > 0
         assert wallet.relay_manager is not None
 
         # Test that we can actually connect
