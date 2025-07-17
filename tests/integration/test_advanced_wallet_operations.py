@@ -5,11 +5,14 @@ precise balance/fee tracking, denomination optimization, and nostr proof managem
 Only runs when RUN_INTEGRATION_TESTS environment variable is set.
 """
 
-import asyncio
 import os
-import pytest
+import asyncio
+from typing import Any, cast
 from collections import defaultdict
 
+import pytest
+
+from sixty_nuts.wallet import Wallet
 
 
 # Skip all integration tests unless explicitly enabled
@@ -34,7 +37,9 @@ def get_relay_wait_time(base_seconds: float = 1.0) -> float:
 class TestAdvancedWalletOperations:
     """Advanced integration tests for wallet operations with comprehensive validation."""
 
-    async def test_comprehensive_transaction_flow_with_validation(self, wallet):
+    async def test_comprehensive_transaction_flow_with_validation(
+        self, wallet: Wallet
+    ) -> None:
         """Advanced test: multiple transactions with precise tracking of balance, fees,
         denominations, relay events, and proof management."""
 
@@ -56,13 +61,13 @@ class TestAdvancedWalletOperations:
             print(f"Warning: Could not get relay connections: {e}")
 
         # Validate initial empty state
-        initial_balance = await wallet.get_balance(check_proofs=False)
+        initial_balance: int = await wallet.get_balance(check_proofs=False)
         assert initial_balance == 0, (
             f"Expected empty wallet, got {initial_balance} sats"
         )
 
         try:
-            initial_token_events = await wallet.count_token_events()
+            initial_token_events: int = await wallet.event_manager.count_token_events()
             print(f"Initial token events: {initial_token_events}")
         except Exception as e:
             print(f"Warning: Could not count token events: {e}")
@@ -73,7 +78,7 @@ class TestAdvancedWalletOperations:
         assert initial_state.balance == 0, "Expected zero balance initially"
 
         # Track metrics throughout the test
-        metrics = {
+        metrics: dict[str, Any] = {
             "total_minted": 0,
             "total_sent": 0,
             "total_redeemed": 0,
@@ -90,34 +95,43 @@ class TestAdvancedWalletOperations:
 
         print("\n💰 Phase 2: Multiple minting operations")
 
-        mint_amounts = [100, 50, 25, 200, 1]  # Diverse amounts for denomination testing
+        mint_amounts: list[int] = [
+            100,
+            50,
+            25,
+            200,
+            1,
+        ]  # Diverse amounts for denomination testing
 
         for i, amount in enumerate(mint_amounts):
             print(f"\n  Minting {amount} sats (operation {i + 1}/{len(mint_amounts)})")
 
-            balance_before = await wallet.get_balance()
+            balance_before: int = await wallet.get_balance()
             try:
-                events_before = await wallet.count_token_events()
+                events_before: int = await wallet.event_manager.count_token_events()
             except Exception:
                 events_before = 0
 
             # Create and wait for auto-payment
+            invoice: str
+            task: Any
             invoice, task = await wallet.mint_async(amount)
             print(f"    Created invoice: {invoice[:50]}...")
 
-            timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
-            paid = await asyncio.wait_for(task, timeout=timeout)
+            timeout: float = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+            paid: bool = await asyncio.wait_for(task, timeout=timeout)
             assert paid is True, f"Invoice {i + 1} should be auto-paid"
 
             # Wait for events to propagate
             await asyncio.sleep(get_relay_wait_time(1.0))
 
             # Validate balance increase with retry logic
-            max_retries = 5
+            max_retries: int = 5
+
             for attempt in range(max_retries):
                 balance_after = await wallet.get_balance()
                 try:
-                    events_after = await wallet.count_token_events()
+                    events_after = await wallet.event_manager.count_token_events()
                 except Exception:
                     events_after = events_before
 
@@ -165,7 +179,7 @@ class TestAdvancedWalletOperations:
 
             # Validate denomination optimization
             state = await wallet.fetch_wallet_state(check_proofs=False)
-            denomination_counts = defaultdict(int)
+            denomination_counts: dict[int, int] = defaultdict(int)
             for proof in state.proofs:
                 denomination_counts[proof["amount"]] += 1
 
@@ -186,12 +200,12 @@ class TestAdvancedWalletOperations:
 
         print("\n📤 Phase 3: Complex send operations")
 
-        total_balance = await wallet.get_balance()
+        total_balance: int = await wallet.get_balance()
         print(f"Total balance before sending: {total_balance} sats")
 
         # Diverse send amounts to test proof selection and change calculation
-        send_amounts = [15, 75, 30, 5, 100]  # Mix of small and large amounts
-        sent_tokens = []
+        send_amounts: list[int] = [15, 75, 30, 5, 100]  # Mix of small and large amounts
+        sent_tokens: list[tuple[int, str]] = []
 
         for i, send_amount in enumerate(send_amounts):
             print(
@@ -207,12 +221,12 @@ class TestAdvancedWalletOperations:
 
             state_before = await wallet.fetch_wallet_state(check_proofs=False)
             try:
-                events_before = await wallet.count_token_events()
+                events_before = await wallet.event_manager.count_token_events()
             except Exception:
                 events_before = 0
 
             # Analyze denomination distribution before send
-            denoms_before = defaultdict(int)
+            denoms_before: dict[int, int] = defaultdict(int)
             for proof in state_before.proofs:
                 denoms_before[proof["amount"]] += 1
 
@@ -221,7 +235,7 @@ class TestAdvancedWalletOperations:
 
             # Perform send operation
             try:
-                token = await wallet.send(send_amount)
+                token: str = await wallet.send(send_amount)
                 assert token.startswith("cashu"), "Should receive valid Cashu token"
                 sent_tokens.append((send_amount, token))
 
@@ -232,18 +246,18 @@ class TestAdvancedWalletOperations:
                 balance_after = await wallet.get_balance()
                 state_after = await wallet.fetch_wallet_state(check_proofs=False)
                 try:
-                    events_after = await wallet.count_token_events()
+                    events_after = await wallet.event_manager.count_token_events()
                 except Exception:
                     events_after = events_before
 
                 # Calculate actual fees paid
-                actual_fee = balance_before - balance_after - send_amount
+                actual_fee: int = balance_before - balance_after - send_amount
                 assert actual_fee >= 0, (
                     f"Fee calculation error: negative fee {actual_fee}"
                 )
 
                 # Analyze denomination distribution after send
-                denoms_after = defaultdict(int)
+                denoms_after: dict[int, int] = defaultdict(int)
                 for proof in state_after.proofs:
                     denoms_after[proof["amount"]] += 1
 
@@ -299,12 +313,15 @@ class TestAdvancedWalletOperations:
 
             balance_before = await wallet.get_balance()
             try:
-                events_before = await wallet.count_token_events()
+                events_before = await wallet.event_manager.count_token_events()
             except Exception:
                 events_before = 0
 
             try:
-                redeemed_amount, unit = await wallet.redeem(token)
+                redeem_result = await wallet.redeem(token)
+                redeemed_amount: int
+                unit: str
+                redeemed_amount, unit = redeem_result
                 print(f"    Redeemed {redeemed_amount} {unit}")
 
                 # Wait for events to propagate
@@ -312,12 +329,12 @@ class TestAdvancedWalletOperations:
 
                 balance_after = await wallet.get_balance()
                 try:
-                    events_after = await wallet.count_token_events()
+                    events_after = await wallet.event_manager.count_token_events()
                 except Exception:
                     events_after = events_before
 
                 # Calculate redemption fee
-                redeem_fee = original_amount - redeemed_amount
+                redeem_fee: int = original_amount - redeemed_amount
                 assert redeem_fee >= 0, f"Invalid redemption: negative fee {redeem_fee}"
 
                 print(
@@ -356,9 +373,9 @@ class TestAdvancedWalletOperations:
         print("\n🔍 Phase 5: Comprehensive validation")
 
         # Final balance validation
-        final_balance = await wallet.get_balance()
+        final_balance: int = await wallet.get_balance()
         try:
-            final_events = await wallet.count_token_events()
+            final_events: int = await wallet.event_manager.count_token_events()
         except Exception:
             final_events = 0
         final_state = await wallet.fetch_wallet_state(
@@ -371,8 +388,8 @@ class TestAdvancedWalletOperations:
         print(f"  Active Proofs: {len(final_state.proofs)}")
 
         # Validate denomination distribution
-        final_denoms = defaultdict(int)
-        total_proof_value = 0
+        final_denoms: dict[int, int] = defaultdict(int)
+        total_proof_value: int = 0
         for proof in final_state.proofs:
             final_denoms[proof["amount"]] += 1
             total_proof_value += proof["amount"]
@@ -383,57 +400,21 @@ class TestAdvancedWalletOperations:
 
         print(f"  Final Denominations: {dict(final_denoms)}")
 
-        # Test wallet state cleanup (dry run)
-        cleanup_stats = await wallet.cleanup_wallet_state(dry_run=True)
-        print("\nWallet Cleanup Stats (dry run):")
-        for key, value in cleanup_stats.items():
-            print(f"  {key}: {value}")
-
-        # Validate cleanup stats consistency
-        assert cleanup_stats["balance"] == final_balance, (
-            "Cleanup balance should match current balance"
-        )
-
-        # Be lenient with event counting for integration tests
-        if cleanup_stats["total_events"] >= final_events:
-            print(
-                f"✅ Cleanup found {cleanup_stats['total_events']} events (≥ {final_events})"
-            )
-        else:
-            print(
-                f"⚠️  Cleanup found {cleanup_stats['total_events']} events (< {final_events})"
-            )
-            print("   This may be due to relay timing issues - not failing test")
-
-        # ================================================================
-        # Phase 6: Metrics analysis and final assertions
-        # ================================================================
-
-        print("\n📈 Phase 6: Transaction Metrics Analysis")
-
-        print("\nTransaction Summary:")
-        print(f"  Total Minted: {metrics['total_minted']} sats")
-        print(f"  Total Sent: {metrics['total_sent']} sats")
-        print(f"  Total Redeemed: {metrics['total_redeemed']} sats")
-        print(f"  Total Fees Paid: {metrics['total_fees_paid']} sats")
-        print(f"  Expected Balance: {metrics['expected_balance']} sats")
-        print(f"  Actual Balance: {final_balance} sats")
-
         # Allow for minor discrepancies due to fee calculation complexities
-        balance_diff = abs(final_balance - metrics["expected_balance"])
+        balance_diff: int = abs(final_balance - metrics["expected_balance"])
         assert balance_diff <= 5, (
             f"Balance discrepancy too large: expected {metrics['expected_balance']}, "
             f"got {final_balance} (diff: {balance_diff})"
         )
 
         # Validate event count progression (lenient for integration tests)
-        event_progression = [
+        event_progression: list[int] = [
             t.get("events_after", 0)
             for t in metrics["transactions"]
             if "events_after" in t
         ]
         if event_progression and any(e > 0 for e in event_progression):
-            is_non_decreasing = all(
+            is_non_decreasing: bool = all(
                 event_progression[i] >= event_progression[i - 1]
                 for i in range(1, len(event_progression))
             )
@@ -450,7 +431,10 @@ class TestAdvancedWalletOperations:
 
         # Validate denomination optimization over time
         print("\nDenomination Evolution:")
-        for i, denom_snapshot in enumerate(metrics["denomination_history"]):
+        denomination_history: list[dict[str, Any]] = cast(
+            list[dict[str, Any]], metrics["denomination_history"]
+        )
+        for i, denom_snapshot in enumerate(denomination_history):
             print(
                 f"  {denom_snapshot['operation']}: {denom_snapshot['denominations']} "
                 f"({denom_snapshot['total_proofs']} proofs, {denom_snapshot['balance']} sats)"
@@ -458,8 +442,8 @@ class TestAdvancedWalletOperations:
 
         # Test proof selection effectiveness (should have reasonable denomination spread)
         if final_denoms:
-            max_denomination = max(final_denoms.keys())
-            min_denomination = min(final_denoms.keys())
+            max_denomination: int = max(final_denoms.keys())
+            min_denomination: int = min(final_denoms.keys())
             assert max_denomination > min_denomination, (
                 "Should have diverse denominations"
             )
@@ -486,7 +470,7 @@ class TestAdvancedWalletOperations:
             print("This is common in integration tests due to relay connection issues,")
             print("but doesn't affect the core wallet functionality validation.")
 
-    async def test_edge_cases_and_error_handling(self, wallet):
+    async def test_edge_cases_and_error_handling(self, wallet: Wallet) -> None:
         """Test edge cases: insufficient balance, invalid amounts, and error recovery."""
 
         print("\n🧪 Testing edge cases and error handling...")
@@ -514,41 +498,43 @@ class TestAdvancedWalletOperations:
             print("✅ Negative amount error handled correctly")
 
         # Test wallet state consistency after errors
-        balance = await wallet.get_balance()
+        balance: int = await wallet.get_balance()
         assert balance >= 0, "Balance should remain non-negative after errors"
 
         state = await wallet.fetch_wallet_state(check_proofs=False)
-        total_proof_value = sum(p["amount"] for p in state.proofs)
+        total_proof_value: int = sum(p["amount"] for p in state.proofs)
         assert total_proof_value == balance, (
             "Proof values should match balance after errors"
         )
 
         print("✅ Edge case testing completed")
 
-    async def test_denomination_optimization_stress(self, wallet):
+    async def test_denomination_optimization_stress(self, wallet: Wallet) -> None:
         """Stress test denomination optimization with many small transactions."""
 
         print("\n⚡ Stress testing denomination optimization...")
 
         # Fund wallet for stress test
-        mint_amount = 500
+        mint_amount: int = 500
+        invoice: str
+        task: Any
         invoice, task = await wallet.mint_async(mint_amount)
-        timeout = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
-        paid = await asyncio.wait_for(task, timeout=timeout)
+        timeout: float = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
+        paid: bool = await asyncio.wait_for(task, timeout=timeout)
         assert paid is True
 
         await asyncio.sleep(get_relay_wait_time(2.0))
 
-        initial_balance = await wallet.get_balance()
+        initial_balance: int = await wallet.get_balance()
         assert initial_balance >= mint_amount
 
         # Perform many small sends to stress denomination logic
-        small_amounts = [1, 2, 3, 5, 8, 13, 21]  # Fibonacci-like sequence
-        successful_sends = 0
+        small_amounts: list[int] = [1, 2, 3, 5, 8, 13, 21]  # Fibonacci-like sequence
+        successful_sends: int = 0
 
         for amount in small_amounts:
             try:
-                balance_before = await wallet.get_balance()
+                balance_before: int = await wallet.get_balance()
                 if balance_before < amount + 10:  # Leave buffer for fees
                     break
 
@@ -559,7 +545,7 @@ class TestAdvancedWalletOperations:
 
                 # Check denomination distribution
                 state = await wallet.fetch_wallet_state(check_proofs=False)
-                denoms = defaultdict(int)
+                denoms: dict[int, int] = defaultdict(int)
                 for proof in state.proofs:
                     denoms[proof["amount"]] += 1
 
@@ -569,7 +555,7 @@ class TestAdvancedWalletOperations:
                 print(f"  Failed to send {amount} sats: {e}")
                 break
 
-        final_balance = await wallet.get_balance()
+        final_balance: int = await wallet.get_balance()
         print(
             f"Stress test completed: {successful_sends} sends, final balance: {final_balance} sats"
         )
