@@ -1557,7 +1557,7 @@ def mint(
                 invoice, task = await wallet.mint_async(
                     amount,
                     mint_url=target_mint_url,
-                    currency=mint_unit,
+                    unit=mint_unit,
                     timeout=timeout,
                 )
 

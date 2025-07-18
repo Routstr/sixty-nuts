@@ -15,6 +15,7 @@ from .types import (
     CurrencyUnit,
     MintError,
 )
+from .lnurl import parse_lightning_invoice_amount
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -331,6 +332,39 @@ class Mint:
         return self._currencies or [
             keyset["unit"] for keyset in (await self.get_active_keysets())
         ]
+
+    async def mint_exchange_rate(self, unit: CurrencyUnit) -> float:
+        """Get exchange rate for a given currency unit in msats per unit."""
+        # TODO: include mint fee
+        if unit == "sat":
+            return 1
+        elif unit == "msat":
+            return 1000
+        elif unit in await self.get_currencies():
+            # TODO: test this
+            quote = await self.create_mint_quote(amount=1000, unit=unit)
+            invoice_amount_sats = parse_lightning_invoice_amount(
+                quote["request"], "sat"
+            )
+            sat_per_base_unit = invoice_amount_sats / 1000
+            return sat_per_base_unit
+        raise NotImplementedError(f"Exchange rate for {unit} not implemented")
+
+    async def melt_exchange_rate(self, unit: CurrencyUnit) -> float:
+        """Get exchange rate for a given currency unit in msats per unit."""
+        # TODO: include mint fee
+        PRECISION_FACTOR = 100_000
+        if unit == "sat":
+            return 1000
+        elif unit == "msat":
+            return 1
+        elif unit in await self.get_currencies():
+            # TODO: test this
+            quote = await self.create_mint_quote(amount=PRECISION_FACTOR, unit="sat")
+            melt_quote = await self.create_melt_quote(quote["request"], unit=unit)
+            sat_per_base_unit = 1 / (melt_quote["amount"] / PRECISION_FACTOR)
+            return sat_per_base_unit
+        raise NotImplementedError(f"Exchange rate for {unit} not implemented")
 
     # ───────────────────────── Minting (receive) ─────────────────────────────────
 

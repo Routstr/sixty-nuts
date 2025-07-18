@@ -140,25 +140,21 @@ class WalletState:
             balances[unit] = balances.get(unit, 0) + proof["amount"]
         return balances
 
-    @property
-    def total_balance_sat(self) -> int:
+    async def total_balance_sat(self) -> int:
         """Get total balance in satoshis (only BTC-based currencies)."""
-        total = 0
+        total_sats = 0
+        for proof in self.proofs:
+            if proof["unit"] == "sat":
+                total_sats += proof["amount"]
+            elif proof["unit"] == "msat":
+                total_sats += proof["amount"] // 1000
+            else:
+                from .mint import Mint
 
-        for unit, balance in self.balance_by_unit.items():
-            if unit == "sat":
-                total += balance
-            elif unit == "msat":
-                total += balance // 1000
-            elif unit == "btc":
-                total += balance * 100_000_000
-
-        return total
-
-    @property
-    def balance(self) -> int:
-        """Get total balance in satoshis for backward compatibility."""
-        return self.total_balance_sat
+                mint = Mint(proof["mint"])
+                exchange_rate = await mint.melt_exchange_rate(proof["unit"])
+                total_sats += int(proof["amount"] * exchange_rate * 0.99)
+        return total_sats
 
     @property
     def proofs_by_keyset(self) -> dict[str, list[Proof]]:
@@ -184,10 +180,20 @@ class WalletState:
 
     @property
     def mint_balances(self) -> dict[str, int]:
-        """Get balances for all mints (backward compatibility)."""
+        """Get balances for all mints in sats."""
         balances: dict[str, int] = {}
         for mint_url, proofs in self.proofs_by_mint.items():
-            balances[mint_url] = sum(p["amount"] for p in proofs)
+            for proof in proofs:
+                if proof["unit"] == "sat":
+                    balances[mint_url] = balances.get(mint_url, 0) + proof["amount"]
+                elif proof["unit"] == "msat":
+                    balances[mint_url] = (
+                        balances.get(mint_url, 0) + proof["amount"] // 1000
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Balance for {proof['unit']} not supported"
+                    )
         return balances
 
 

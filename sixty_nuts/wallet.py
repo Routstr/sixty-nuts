@@ -174,7 +174,7 @@ class Wallet:
         # Check if this is a trusted mint
         if auto_swap and self.mint_urls and mint_url not in self.mint_urls:
             # Token is from untrusted mint - swap to our primary mint
-            proofs = await self.transfer_proofs(proofs, self._primary_mint_url())
+            return await self.remote_redeem_proofs(proofs, self._primary_mint_url())
 
         # Proceed with normal redemption for trusted mints
         # Calculate total amount
@@ -215,7 +215,7 @@ class Wallet:
         amount: int,
         *,
         mint_url: str | None = None,
-        currency: CurrencyUnit | None = None,
+        unit: CurrencyUnit | None = None,
         timeout: int = 300,
     ) -> tuple[str, asyncio.Task[bool]]:
         """Create a Lightning invoice and return a task that completes when paid.
@@ -240,8 +240,8 @@ class Wallet:
         """
         mint = self._get_mint(mint_url or self._primary_mint_url())
         # Convert amount to base unit for the currency (e.g., dollars to cents)
-        base_amount = self._convert_to_base_unit(amount, currency or "sat")
-        quote_resp = await mint.create_mint_quote(amount=base_amount, unit=currency)
+        base_amount = self._convert_to_base_unit(amount, unit or "sat")
+        quote_resp = await mint.create_mint_quote(amount=base_amount, unit=unit)
         quote_id, invoice = quote_resp["quote"], quote_resp["request"]
 
         async def poll_payment() -> bool:
@@ -328,13 +328,16 @@ class Wallet:
 
         state = await self.fetch_wallet_state(check_proofs=True)
         total_needed = int(invoice_amount_sat * 1.01)
-        self.raise_if_insufficient_balance(state.total_balance_sat, total_needed)
+        total_balance = await state.total_balance_sat()
+        self.raise_if_insufficient_balance(total_balance, total_needed)
 
         if target_mint is None:
             mint_balances = state.mint_balances
             target_mint = max(mint_balances, key=lambda k: mint_balances[k])
             if mint_balances[target_mint] < total_needed:
-                await self.transfer_balance_to_mint(total_needed, target_mint)
+                await self.transfer_balance_to_mint(
+                    total_needed, from_mint=None, to_mint=target_mint
+                )
                 return await self.melt(invoice, target_mint=target_mint)
 
         # Create melt quote to get fees
@@ -342,7 +345,9 @@ class Wallet:
         melt_quote = await mint.create_melt_quote(request=invoice)
         fee_reserve = melt_quote.get("fee_reserve", 0)
         total_needed = invoice_amount_sat + fee_reserve
-        self.raise_if_insufficient_balance(state.total_balance_sat, total_needed)
+        self.raise_if_insufficient_balance(
+            await state.total_balance_sat(), total_needed
+        )
 
         # Select proofs for the total amount needed (invoice + fees)
         selected_proofs, consumed_proofs = await self._select_proofs(
@@ -489,12 +494,9 @@ class Wallet:
             # Send USD to Lightning Address
             paid = await wallet.send_to_lnurl("user@getalby.com", 50, unit="usd")
         """
-        state = await self.fetch_wallet_state(check_proofs=True)
-
         total_needed_estimated = int(amount * 1.01)
-        self.raise_if_insufficient_balance(
-            state.total_balance_sat, total_needed_estimated
-        )
+        total_balance = await self.get_balance()
+        self.raise_if_insufficient_balance(total_balance, total_needed_estimated)
 
         lnurl_data = await get_lnurl_data(lnurl)
 
@@ -1172,239 +1174,104 @@ class Wallet:
                     )
                     print(f"   Manual recovery may be needed from: {backup_file}")
 
-    async def transfer_proofs(
-        self, proofs: list[Proof], target_mint: str
-    ) -> list[Proof]:
-        raise NotImplementedError("Not implemented")  # TODO: Implement
-
-    async def _create_proofs_at_mint(
+    async def remote_redeem_proofs(
         self,
-        mint_url: str,
-        amount: int,
-        denominations: dict[int, int],
-        currency: CurrencyUnit = "sat",
-    ) -> list[Proof]:
-        """Create new proofs at a specific mint with given denominations.
+        proofs: list[Proof],
+        target_mint: str,
+        target_unit: CurrencyUnit = "sat",
+    ) -> tuple[int, CurrencyUnit]:
+        if not proofs:
+            return 0, "sat"
 
-        This is a simplified version that creates proofs without requiring
-        Lightning infrastructure by using the mint's swap functionality.
-        """
-        from .crypto import (
-            create_blinded_message_with_secret,
+        # Assume all proofs from same mint
+        source_mint_url = proofs[0]["mint"]
+        if not all(p["mint"] == source_mint_url for p in proofs):
+            raise WalletError("Proofs must be from the same mint for transfer")
+
+        source_mint = Mint(source_mint_url)
+
+        total_amount_sats = await sats_value_of_proofs(proofs)
+        if total_amount_sats == 0:
+            return 0, "sat"
+
+        invoice, mint_task = await self.mint_async(
+            total_amount_sats, mint_url=target_mint
         )
 
-        mint = self._get_mint(mint_url)
+        melt_quote = await source_mint.create_melt_quote(
+            request=invoice,
+        )
+        fee_reserve = melt_quote.get("fee_reserve", 0)
+        total_needed = total_amount_sats + fee_reserve
+        self.raise_if_insufficient_balance(await self.get_balance(), total_needed)
 
-        active_keysets = await mint.get_active_keysets()
-        keyset = next((ks for ks in active_keysets if ks.get("unit") == currency), None)
-        if not keyset:
+        melt_resp = await source_mint.melt(
+            quote=melt_quote["quote"], inputs=cast(list[ProofComplete], proofs)
+        )
+
+        # Check if payment was successful
+        if not melt_resp.get("paid", False):
             raise WalletError(
-                f"No keyset found for currency {currency} on mint {mint.url}"
+                f"Lightning payment failed. State: {melt_resp.get('state', 'unknown')}"
             )
-        keyset_id = str(keyset["id"])
 
-        # Create blinded messages for target denominations
-        outputs: list[BlindedMessage] = []
-        secrets: list[str] = []
-        blinding_factors: list[str] = []
+        await mint_task
 
-        for denomination, count in sorted(denominations.items()):
-            for _ in range(count):
-                secret, r_hex, blinded_msg = create_blinded_message_with_secret(
-                    denomination, keyset_id
-                )
-                outputs.append(blinded_msg)
-                secrets.append(secret)
-                blinding_factors.append(r_hex)
+        return total_amount_sats, target_unit
 
-        # For this simplified implementation, we'll create a mint quote
-        # and immediately mark it as paid (this requires mint cooperation)
-        # In a full implementation, this would involve Lightning payments
-
-        # Create mint quote
-        quote_resp = await mint.create_mint_quote(
-            unit=currency,
-            amount=amount,
-        )
-        quote_id = quote_resp["quote"]
-        print(f"Quote ID: {quote_id}")
-        # TODO: Implement mint quote payment
-        # Attempt to mint using the quote
-        # Note: This will fail unless the invoice is actually paid
-        # For now, we'll raise an error indicating Lightning payment is needed
-        raise WalletError(
-            f"Cross-mint transfers require Lightning payment infrastructure. "
-            f"Please pay invoice: {quote_resp.get('request', 'No invoice available')} "
-            f"to complete transfer of {amount} sats to {mint_url}"
-        )
-
-    async def transfer_balance_to_mint(self, amount: int, target_mint: str) -> None:
-        """Transfer balance to a specific mint using optimal selection.
-
-        Args:
-            amount: Amount to transfer in sats
-            target_mint: Target mint URL
-
-        Raises:
-            WalletError: If insufficient balance or transfer fails
-        """
-        # Get current wallet state
+    async def transfer_balance_to_mint(
+        self,
+        amount_sats: int,
+        *,
+        to_mint: str,
+        from_mint: str | None = None,
+        target_unit: CurrencyUnit | None = None,
+        exclude_mints: list[str] = [],
+    ) -> tuple[int, CurrencyUnit]:
         state = await self.fetch_wallet_state(check_proofs=True)
 
-        # Get all proofs not from target mint
-        source_proofs = [p for p in state.proofs if p.get("mint") != target_mint]
+        if not from_mint:
+            mint_sats_balances: dict[str, int] = {}
+            for mint in set(p["mint"] for p in state.proofs if "mint" in p):
+                if mint in exclude_mints or mint == to_mint:
+                    continue
+                mint_proofs = [p for p in state.proofs if p["mint"] == mint]
+                mint_sats = await sats_value_of_proofs(mint_proofs)
+                if mint_sats > 0:
+                    mint_sats_balances[mint] = mint_sats
+            if not mint_sats_balances:
+                raise WalletError("No source mints with balance available")
+            from_mint = max(mint_sats_balances, key=lambda k: mint_sats_balances[k])
 
-        if not source_proofs:
-            raise WalletError("No proofs available from other mints for transfer")
-
-        # Group by mint and calculate available balance per mint
-        mint_balances: dict[str, tuple[int, list[Proof]]] = {}
-        for proof in source_proofs:
-            mint_url = proof.get("mint") or ""
-            if not mint_url:
-                continue  # Skip proofs without mint URL
-            if mint_url not in mint_balances:
-                mint_balances[mint_url] = (0, [])
-            balance, proofs_list = mint_balances[mint_url]
-            mint_balances[mint_url] = (balance + proof["amount"], proofs_list + [proof])
-
-        # Calculate transfer costs and net transferable amounts
-        transfer_options: list[tuple[str, int, int, list[Proof]]] = []
-
-        for mint_url, (balance, mint_proofs) in mint_balances.items():
-            try:
-                # Estimate transfer fees
-                mint = self._get_mint(mint_url)
-                estimated_fees = await self.calculate_total_input_fees(
-                    mint, mint_proofs
-                )
-                net_transferable = balance - estimated_fees
-
-                if net_transferable > 0:
-                    transfer_options.append(
-                        (mint_url, balance, net_transferable, mint_proofs)
-                    )
-            except Exception as e:
-                print(f"Warning: Could not calculate fees for {mint_url}: {e}")
-                # Assume 10% fee as fallback
-                estimated_fees = balance // 10
-                net_transferable = balance - estimated_fees
-                if net_transferable > 0:
-                    transfer_options.append(
-                        (mint_url, balance, net_transferable, mint_proofs)
-                    )
-
-        # Sort by net transferable amount (descending)
-        transfer_options.sort(key=lambda x: x[2], reverse=True)
-
-        total_available = sum(option[2] for option in transfer_options)
-        if total_available < amount:
+        proofs_from_mint = [p for p in state.proofs if p.get("mint") == from_mint]
+        total_sats_from_mint = await sats_value_of_proofs(proofs_from_mint)
+        transfer_sats = min(amount_sats, total_sats_from_mint)
+        if transfer_sats <= 0:
             raise WalletError(
-                f"Insufficient transferable balance: need {amount}, "
-                f"have {total_available} (after estimated fees)"
+                f"Insufficient balance. Need at least {amount_sats}, but have 0 in available mints"
+            )
+        if not target_unit:
+            target_unit = "sat"
+
+        invoice, async_task = await self.mint_async(
+            transfer_sats, mint_url=to_mint, unit=target_unit
+        )
+
+        await self.melt(invoice, target_mint=from_mint)
+
+        await async_task
+
+        remaining = amount_sats - transfer_sats
+        if remaining > 0:
+            await self.transfer_balance_to_mint(
+                remaining,
+                to_mint=to_mint,
+                from_mint=None,
+                target_unit=target_unit,
+                exclude_mints=cast(list[str], exclude_mints + [from_mint]),
             )
 
-        # Select proofs to transfer, starting with largest balances
-        remaining_needed = amount
-        proofs_to_transfer: list[Proof] = []
-
-        for mint_url, gross_balance, net_transferable, mint_proofs in transfer_options:
-            if remaining_needed <= 0:
-                break
-
-            # Take the amount we need from this mint (up to what's available)
-            take_amount = min(remaining_needed, net_transferable)
-
-            # Select proofs greedily to meet take_amount
-            selected_proofs = []
-            selected_total = 0
-
-            # Sort proofs by amount (descending) for greedy selection
-            sorted_proofs = sorted(mint_proofs, key=lambda p: p["amount"], reverse=True)
-
-            for proof in sorted_proofs:
-                if selected_total >= take_amount:
-                    break
-                selected_proofs.append(proof)
-                selected_total += proof["amount"]
-
-            if selected_total < take_amount:
-                # Need to split proofs to get exact amount
-                # For simplicity, take all proofs from this mint if we need them
-                selected_proofs = mint_proofs
-                selected_total = gross_balance
-
-            proofs_to_transfer.extend(selected_proofs)
-            remaining_needed -= min(take_amount, selected_total)
-
-        if remaining_needed > 0:
-            raise WalletError(
-                f"Could not select enough proofs: {remaining_needed} sats short"
-            )
-
-        # Perform the transfer
-        try:
-            await self.transfer_proofs(proofs_to_transfer, target_mint)
-        except WalletError as e:
-            if "Lightning payment infrastructure" in str(e):
-                # For now, raise a more user-friendly error
-                raise WalletError(
-                    "Multi-mint transfers require Lightning infrastructure which is not yet implemented. "
-                    "Please consolidate your funds to a single mint manually, or wait for this feature to be completed."
-                ) from e
-            raise
-
-    async def summon_mint_with_balance(
-        self, amount: int, unit: CurrencyUnit = "sat"
-    ) -> str:
-        """Summon a mint with at least the given amount of balance in the specified unit.
-
-        Args:
-            amount: Amount needed in the specified unit
-            unit: Currency unit (defaults to "sat")
-
-        Returns:
-            Mint URL with sufficient balance
-
-        Raises:
-            WalletError: If insufficient balance or transfer fails
-        """
-        try:
-            # Try to find a mint with sufficient balance
-            return await self._select_mint_for_amount(amount, unit)
-        except WalletError:
-            # No single mint has enough balance, try to consolidate
-            state = await self.fetch_wallet_state(check_proofs=True)
-
-            # Filter proofs by unit
-            unit_proofs = [p for p in state.proofs if p.get("unit") == unit]
-            total_unit_balance = sum(p["amount"] for p in unit_proofs)
-
-            # Check if we have enough total balance
-            if total_unit_balance < amount:
-                raise WalletError(
-                    f"Insufficient {unit.upper()} balance. Need at least {amount}, "
-                    f"but have {total_unit_balance}"
-                )
-
-            # Select a target mint (prefer one with the most balance already)
-            mint_balances: dict[str, int] = {}
-            for proof in unit_proofs:
-                mint_url = proof.get("mint", "")
-                if mint_url:
-                    mint_balances[mint_url] = (
-                        mint_balances.get(mint_url, 0) + proof["amount"]
-                    )
-
-            if not mint_balances:
-                raise WalletError(f"No mints found with {unit.upper()} balance")
-
-            target_mint = max(mint_balances, key=lambda k: mint_balances[k])
-
-            # Transfer balance from other mints to the target mint
-            await self.transfer_balance_to_mint(amount, target_mint)
-
-            return target_mint
+        return amount_sats, target_unit
 
     # ───────────────────────── Helper Methods ─────────────────────────────────
 
@@ -1991,7 +1858,7 @@ class Wallet:
             if unit not in state.balance_by_unit:
                 raise WalletError(f"Unsupported currency unit: {unit}")
             return state.balance_by_unit[unit]
-        return state.total_balance_sat
+        return await state.total_balance_sat()
 
     async def get_balance_by_mint(self, mint_url: str) -> int:
         """Get balance for a specific mint."""
@@ -2600,3 +2467,17 @@ class Wallet:
 
         print(f"\n✨ Recovery complete! Recovered {stats['recovered']} proofs")
         return stats
+
+
+async def sats_value_of_proofs(proofs: list[Proof]) -> int:
+    """Get the total value of proofs in sats."""
+    total_sats = 0
+    for proof in proofs:
+        if proof["unit"] == "sat":
+            total_sats += proof["amount"]
+        elif proof["unit"] == "msat":
+            total_sats += proof["amount"] // 1000
+        else:
+            exchange_rate = await Mint(proof["mint"]).mint_exchange_rate(proof["unit"])
+            total_sats += int(proof["amount"] * exchange_rate)
+    return total_sats
