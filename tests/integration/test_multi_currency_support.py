@@ -143,7 +143,7 @@ class TestMultiCurrencySupport:
                 invoice: str
                 task: Any
                 invoice, task = await wallet.mint_async(
-                    amount=amount, currency=cast(CurrencyUnit, currency), timeout=60
+                    amount=amount, unit=cast(CurrencyUnit, currency), timeout=60
                 )
                 print(f"    Invoice created: {invoice[:50]}...")
 

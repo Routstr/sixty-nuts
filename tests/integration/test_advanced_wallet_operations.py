@@ -75,7 +75,9 @@ class TestAdvancedWalletOperations:
 
         initial_state = await wallet.fetch_wallet_state(check_proofs=False)
         assert len(initial_state.proofs) == 0, "Expected no proofs initially"
-        assert initial_state.balance == 0, "Expected zero balance initially"
+        assert await initial_state.total_balance_sat() == 0, (
+            "Expected zero balance initially"
+        )
 
         # Track metrics throughout the test
         metrics: dict[str, Any] = {
@@ -188,7 +190,7 @@ class TestAdvancedWalletOperations:
                     "operation": f"mint_{amount}",
                     "denominations": dict(denomination_counts),
                     "total_proofs": len(state.proofs),
-                    "balance": state.balance,
+                    "balance": await state.total_balance_sat(),
                 }
             )
 
@@ -290,7 +292,7 @@ class TestAdvancedWalletOperations:
                         "operation": f"send_{send_amount}",
                         "denominations": dict(denoms_after),
                         "total_proofs": len(state_after.proofs),
-                        "balance": state_after.balance,
+                        "balance": await state_after.total_balance_sat(),
                     }
                 )
 

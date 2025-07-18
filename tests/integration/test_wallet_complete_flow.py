@@ -247,7 +247,7 @@ class TestWalletTransactions:
             get_relay_wait_time(2.0)
         )  # Give time for events to propagate
         state = await wallet.fetch_wallet_state()
-        balance_after_send: int = state.balance
+        balance_after_send: int = await wallet.get_balance()
         print(
             f"\nDEBUG after send: {len(state.proofs)} proofs, total {balance_after_send} sats"
         )
@@ -271,8 +271,7 @@ class TestWalletTransactions:
         await asyncio.sleep(get_relay_wait_time(2.0))
 
         # 5. Verify final balance (accounting for fees)
-        state = await wallet.fetch_wallet_state()
-        final_balance: int = state.balance
+        final_balance: int = await wallet.get_balance()
         print(
             f"\nDEBUG after redeem: {len(state.proofs)} proofs, total {final_balance} sats"
         )
