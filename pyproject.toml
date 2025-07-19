@@ -45,7 +45,12 @@ qr = ["qrcode>=8.0"]
 nuts = "sixty_nuts.cli:cli"
 
 [dependency-groups]
-dev = ["mypy>=1.16.0", "pytest-asyncio>=1.0.0", "ruff>=0.11.12"]
+dev = [
+    "sixty-nuts[qr]",
+    "mypy>=1.16.0",
+    "pytest-asyncio>=1.0.0",
+    "ruff>=0.11.12",
+]
 
 [tool.pytest.ini_options]
 # Test discovery and collection
