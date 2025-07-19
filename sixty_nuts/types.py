@@ -140,7 +140,7 @@ class WalletState:
             balances[unit] = balances.get(unit, 0) + proof["amount"]
         return balances
 
-    async def total_balance_sat(self) -> int:
+    async def total_balance_sat(self, include_shitnuts: bool = False) -> int:
         """Get total balance in satoshis (only BTC-based currencies)."""
         total_sats = 0
         for proof in self.proofs:
@@ -148,11 +148,12 @@ class WalletState:
                 total_sats += proof["amount"]
             elif proof["unit"] == "msat":
                 total_sats += proof["amount"] // 1000
-            else:
+            elif include_shitnuts:
                 from .mint import Mint
 
                 mint = Mint(proof["mint"])
                 exchange_rate = await mint.melt_exchange_rate(proof["unit"])
+                # Apply 0.99 multiplier as rough estimate for fees (1% buffer)
                 total_sats += int(proof["amount"] * exchange_rate * 0.99)
         return total_sats
 
@@ -180,7 +181,10 @@ class WalletState:
 
     @property
     def mint_balances(self) -> dict[str, int]:
-        """Get balances for all mints in sats."""
+        """Get balances for all mints in sats
+        (BTC-based currencies only).
+        TODO: add support for non-BTC currencies.
+        """
         balances: dict[str, int] = {}
         for mint_url, proofs in self.proofs_by_mint.items():
             for proof in proofs:
@@ -190,10 +194,23 @@ class WalletState:
                     balances[mint_url] = (
                         balances.get(mint_url, 0) + proof["amount"] // 1000
                     )
-                else:
-                    raise NotImplementedError(
-                        f"Balance for {proof['unit']} not supported"
-                    )
+                # Skip non-BTC currencies instead of throwing error
+            if mint_url not in balances:
+                balances[mint_url] = 0
+        return balances
+
+    @property
+    def mint_balances_by_unit(self) -> dict[str, dict[str, int]]:
+        """Get balances for all mints organized by currency unit."""
+        balances: dict[str, dict[str, int]] = {}
+        for mint_url, proofs in self.proofs_by_mint.items():
+            if mint_url not in balances:
+                balances[mint_url] = {}
+            for proof in proofs:
+                unit = proof.get("unit", "sat")
+                balances[mint_url][unit] = (
+                    balances[mint_url].get(unit, 0) + proof["amount"]
+                )
         return balances
 
 
