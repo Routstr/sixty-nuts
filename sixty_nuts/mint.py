@@ -4,6 +4,7 @@ Cashu Mint API client wrapper."""
 from __future__ import annotations
 
 import os
+import time
 from typing import TypedDict, cast, Any
 
 import httpx
@@ -29,11 +30,14 @@ class InvalidKeysetError(MintError):
 
 class Mint:
     def __init__(self, url: str) -> None:
-        self.url = url
+        # Normalize URL by removing trailing slashes
+        self.url = url.rstrip("/")
         self.client = httpx.AsyncClient()
         self._active_keysets: list[Keyset] = []
         self._currencies: list[CurrencyUnit] = []
-        # self.exchange_rates: dict[CurrencyUnit, dict[CurrencyUnit, float]] = {} # TODO implement
+        # Exchange rate cache: {cache_key: (rate, timestamp)}
+        self._exchange_rate_cache: dict[str, tuple[float, float]] = {}
+        self._exchange_rate_cache_ttl = 300  # 5 minutes cache TTL
 
     async def aclose(self) -> None:
         """Close the HTTP client if we created it."""
@@ -49,6 +53,8 @@ class Mint:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Make HTTP request to mint."""
+        if os.environ.get("MINT_DEBUG", "false").lower() == "true":
+            print(f"MINT_DEBUG {method} request to {self.url}{path}")
         response = await self.client.request(
             method,
             f"{self.url}{path}",
@@ -334,35 +340,79 @@ class Mint:
         ]
 
     async def mint_exchange_rate(self, unit: CurrencyUnit) -> float:
-        """Get exchange rate for a given currency unit in msats per unit."""
-        # TODO: include mint fee
+        """Get exchange rate for converting a currency unit to satoshis.
+
+        Returns how many satoshis equal one unit of the given currency.
+        For example: USD returns ~3000 (meaning 1 USD = 3000 sats)
+
+        NOTE: This does not include mint fees. The actual cost to mint will be higher
+        due to both Lightning network fees and mint fees. Consider adding a buffer
+        (e.g., 1-2%) when using these rates for calculations.
+        """
+        # TODO: include mint fee in exchange rate calculation
         if unit == "sat":
             return 1
         elif unit == "msat":
             return 1000
         elif unit in await self.get_currencies():
+            # Use same cache as melt_exchange_rate (rates should be similar)
+            current_time = time.time()
+            cache_key = f"mint_{unit}"  # Different cache key for mint rates
+            if cache_key in self._exchange_rate_cache:
+                rate, timestamp = self._exchange_rate_cache[cache_key]
+                if current_time - timestamp < self._exchange_rate_cache_ttl:
+                    return rate
+
+            # Cache miss or expired - fetch new rate
             # TODO: test this
             quote = await self.create_mint_quote(amount=1000, unit=unit)
             invoice_amount_sats = parse_lightning_invoice_amount(
                 quote["request"], "sat"
             )
             sat_per_base_unit = invoice_amount_sats / 1000
+
+            # Update cache
+            self._exchange_rate_cache[cache_key] = (sat_per_base_unit, current_time)
+
             return sat_per_base_unit
         raise NotImplementedError(f"Exchange rate for {unit} not implemented")
 
     async def melt_exchange_rate(self, unit: CurrencyUnit) -> float:
-        """Get exchange rate for a given currency unit in msats per unit."""
-        # TODO: include mint fee
+        """Get exchange rate for converting a currency unit to satoshis.
+
+        NOTE: The return values for BTC units seem inverted - this may be a bug:
+        - Returns 1000 for "sat" (should be 1?)
+        - Returns 1 for "msat" (should be 0.001?)
+
+        TODO: Verify and fix the return values for BTC-based units.
+
+        NOTE: This does not include mint fees. The actual proceeds from melting will be lower
+        due to both Lightning network fees and mint fees. Consider adding a buffer
+        (e.g., 1-2%) when using these rates for calculations.
+        """
+        # TODO: include mint fee in exchange rate calculation
         PRECISION_FACTOR = 100_000
         if unit == "sat":
             return 1000
         elif unit == "msat":
             return 1
         elif unit in await self.get_currencies():
+            # Check cache first
+            current_time = time.time()
+            if unit in self._exchange_rate_cache:
+                rate, timestamp = self._exchange_rate_cache[unit]
+                if current_time - timestamp < self._exchange_rate_cache_ttl:
+                    return rate
+
+            # Cache miss or expired - fetch new rate
             # TODO: test this
             quote = await self.create_mint_quote(amount=PRECISION_FACTOR, unit="sat")
             melt_quote = await self.create_melt_quote(quote["request"], unit=unit)
             sat_per_base_unit = 1 / (melt_quote["amount"] / PRECISION_FACTOR)
+
+            # Update cache
+            self._exchange_rate_cache[unit] = (sat_per_base_unit, current_time)
+
             return sat_per_base_unit
         raise NotImplementedError(f"Exchange rate for {unit} not implemented")
 

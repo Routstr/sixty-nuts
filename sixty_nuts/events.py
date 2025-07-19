@@ -145,8 +145,9 @@ class EventManager:
         content_data = [
             ["privkey", wallet_privkey],
         ]
-        # Deduplicate mint URLs before storing
-        unique_mint_urls = list(dict.fromkeys(self.mint_urls))  # Preserves order
+        # Normalize and deduplicate mint URLs before storing
+        normalized_mint_urls = [url.rstrip("/") for url in self.mint_urls]
+        unique_mint_urls = list(dict.fromkeys(normalized_mint_urls))  # Preserves order
         for mint_url in unique_mint_urls:
             content_data.append(["mint", mint_url])
 
