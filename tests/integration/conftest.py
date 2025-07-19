@@ -11,6 +11,8 @@ import os
 import pytest
 import shutil
 from pathlib import Path
+from typing import AsyncGenerator, Any, Callable, Awaitable
+from collections.abc import Generator
 
 from sixty_nuts.wallet import Wallet
 from sixty_nuts.crypto import generate_privkey
@@ -40,13 +42,13 @@ def get_relay_wait_time(base_seconds: float = 2.0) -> float:
 
 
 @pytest.fixture
-def test_nsec():
+def test_nsec() -> str:
     """Generate a test nostr private key."""
     return generate_privkey()
 
 
 @pytest.fixture
-def test_mint_urls():
+def test_mint_urls() -> list[str]:
     """Test mint URLs for integration tests.
 
     Uses local Docker mint when USE_LOCAL_SERVICES is set,
@@ -62,7 +64,7 @@ def test_mint_urls():
 
 
 @pytest.fixture
-def test_relays():
+def test_relays() -> list[str]:
     """Test relay URLs for integration tests.
 
     Uses local Docker relay when USE_LOCAL_SERVICES is set,
@@ -78,14 +80,14 @@ def test_relays():
 
 
 @pytest.fixture(autouse=True)
-def clean_proof_backups():
+def clean_proof_backups() -> Generator[None, None, None]:
     """Clean proof backups before each test to ensure isolated state.
 
     This prevents tests from recovering proofs from previous runs,
     which would cause unexpected non-zero balances.
     """
-    backup_dir = Path.cwd() / "proof_backups"
-    test_backup_dir = Path.cwd() / "test_proof_backups"
+    backup_dir: Path = Path.cwd() / "proof_backups"
+    test_backup_dir: Path = Path.cwd() / "test_proof_backups"
 
     # Move existing backups to temporary location if they exist
     if backup_dir.exists():
@@ -103,7 +105,9 @@ def clean_proof_backups():
 
 
 @pytest.fixture
-async def wallet(test_nsec, test_mint_urls, test_relays):
+async def wallet(
+    test_nsec: str, test_mint_urls: list[str], test_relays: list[str]
+) -> AsyncGenerator[Wallet, None]:
     """Create a test wallet instance with controlled mint configuration.
 
     This fixture ensures that:
@@ -112,7 +116,7 @@ async def wallet(test_nsec, test_mint_urls, test_relays):
     3. Resources are cleaned up after test
     """
     # Store original environment to restore later
-    original_env_mints = os.environ.get("CASHU_MINTS")
+    original_env_mints: str | None = os.environ.get("CASHU_MINTS")
 
     # Clear environment mints to prevent interference
     if "CASHU_MINTS" in os.environ:
@@ -120,38 +124,36 @@ async def wallet(test_nsec, test_mint_urls, test_relays):
 
     try:
         # Create wallet with explicit test configuration
-        wallet = await Wallet.create(
+        wallet_instance: Wallet = await Wallet.create(
             nsec=test_nsec,
             mint_urls=test_mint_urls,
-            currency="sat",
-            relays=test_relays,
+            relay_urls=test_relays,
             auto_init=False,  # Don't auto-initialize to avoid conflicts
         )
 
         # Force wallet to use ONLY our test mints
         # This overrides any mints from environment or wallet events
-        wallet.mint_urls = set(test_mint_urls)
-
-        # Re-initialize event manager with controlled mint set
-        await wallet._initialize_event_manager()
+        wallet_instance.mint_urls = list(test_mint_urls)
 
         # Override wallet methods to disable local backup checking during tests
-        original_fetch_wallet_state = wallet.fetch_wallet_state
+        original_fetch_wallet_state: Callable[..., Awaitable[Any]] = (
+            wallet_instance.fetch_wallet_state
+        )
 
-        async def fetch_wallet_state_no_backups(**kwargs):
+        async def fetch_wallet_state_no_backups(**kwargs: Any) -> Any:
             kwargs["check_local_backups"] = False
             return await original_fetch_wallet_state(**kwargs)
 
-        wallet.fetch_wallet_state = fetch_wallet_state_no_backups
+        setattr(wallet_instance, "fetch_wallet_state", fetch_wallet_state_no_backups)
 
         # Initialize wallet explicitly
-        await wallet.initialize_wallet(force=True)
+        # await wallet_instance.event_manager.initialize_wallet(force=True)
 
-        yield wallet
+        yield wallet_instance
 
     finally:
         # Cleanup
-        await wallet.aclose()
+        await wallet_instance.aclose()
 
         # Restore original environment
         if original_env_mints is not None:
@@ -159,14 +161,16 @@ async def wallet(test_nsec, test_mint_urls, test_relays):
 
 
 @pytest.fixture
-async def clean_wallet(test_nsec, test_mint_urls, test_relays):
+async def clean_wallet(
+    test_nsec: str, test_mint_urls: list[str], test_relays: list[str]
+) -> AsyncGenerator[Wallet, None]:
     """Create a clean test wallet instance without initialization.
 
     This fixture is for tests that need to control wallet initialization
     themselves or test initialization behavior.
     """
     # Store original environment to restore later
-    original_env_mints = os.environ.get("CASHU_MINTS")
+    original_env_mints: str | None = os.environ.get("CASHU_MINTS")
 
     # Clear environment mints to prevent interference
     if "CASHU_MINTS" in os.environ:
@@ -174,34 +178,32 @@ async def clean_wallet(test_nsec, test_mint_urls, test_relays):
 
     try:
         # Create wallet with explicit test configuration
-        wallet = await Wallet.create(
+        wallet_instance: Wallet = await Wallet.create(
             nsec=test_nsec,
             mint_urls=test_mint_urls,
-            currency="sat",
-            relays=test_relays,
+            relay_urls=test_relays,
             auto_init=False,
         )
 
         # Force wallet to use ONLY our test mints
-        wallet.mint_urls = set(test_mint_urls)
-
-        # Re-initialize event manager with controlled mint set
-        await wallet._initialize_event_manager()
+        wallet_instance.mint_urls = list(test_mint_urls)
 
         # Override wallet methods to disable local backup checking during tests
-        original_fetch_wallet_state = wallet.fetch_wallet_state
+        original_fetch_wallet_state: Callable[..., Awaitable[Any]] = (
+            wallet_instance.fetch_wallet_state
+        )
 
-        async def fetch_wallet_state_no_backups(**kwargs):
+        async def fetch_wallet_state_no_backups(**kwargs: Any) -> Any:
             kwargs["check_local_backups"] = False
             return await original_fetch_wallet_state(**kwargs)
 
-        wallet.fetch_wallet_state = fetch_wallet_state_no_backups
+        setattr(wallet_instance, "fetch_wallet_state", fetch_wallet_state_no_backups)
 
-        yield wallet
+        yield wallet_instance
 
     finally:
         # Cleanup
-        await wallet.aclose()
+        await wallet_instance.aclose()
 
         # Restore original environment
         if original_env_mints is not None:

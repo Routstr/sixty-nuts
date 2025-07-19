@@ -15,9 +15,21 @@ These tests verify:
 import os
 import pytest
 import asyncio
-from typing import Any
+from typing import Any, AsyncGenerator, cast
 
-from sixty_nuts.mint import Mint, MintError, BlindedMessage
+from sixty_nuts.mint import (
+    Mint,
+    MintError,
+    BlindedMessage,
+    MintInfo,
+    Keyset,
+    KeysetInfo,
+    PostMintQuoteResponse,
+    PostCheckStateResponse,
+    PostMeltQuoteResponse,
+    ProofComplete,
+)
+from sixty_nuts.types import Proof
 
 
 # Skip all integration tests unless explicitly enabled
@@ -28,7 +40,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-async def mint():
+async def mint() -> AsyncGenerator[Mint, None]:
     """Create a mint instance for testing.
 
     Uses local Docker mint when USE_LOCAL_SERVICES is set,
@@ -45,7 +57,7 @@ async def mint():
 
 
 @pytest.fixture
-async def mint_local():
+async def mint_local() -> AsyncGenerator[Mint, None]:
     """Create a mint instance specifically for local testing (if available)."""
     mint_instance = Mint("http://localhost:3338")
     yield mint_instance
@@ -55,9 +67,9 @@ async def mint_local():
 class TestMintBasicOperations:
     """Test basic mint operations that require live mint API."""
 
-    async def test_get_mint_info(self, mint):
+    async def test_get_mint_info(self, mint: Mint) -> None:
         """Test retrieving mint information from real mint."""
-        info = await mint.get_info()
+        info: MintInfo = await mint.get_info()
 
         # Verify expected fields are present
         assert isinstance(info, dict)
@@ -81,14 +93,12 @@ class TestMintBasicOperations:
 
         print(f"✅ Mint info retrieved: {info}")
 
-    async def test_get_keysets(self, mint):
-        """Test retrieving active keysets from real mint."""
-        keysets_resp = await mint.get_keysets()
+    async def test_get_keysets(self, mint: Mint) -> None:
+        """Test retrieving keyset information from real mint."""
+        keysets: list[KeysetInfo] = await mint.get_keysets_info()
 
-        assert "keysets" in keysets_resp
-        keysets = keysets_resp["keysets"]
         assert isinstance(keysets, list)
-        assert len(keysets) > 0, "Mint should have at least one active keyset"
+        assert len(keysets) > 0, "Mint should have at least one keyset"
 
         # Verify keyset structure
         for keyset in keysets:
@@ -107,61 +117,68 @@ class TestMintBasicOperations:
             assert isinstance(keyset["active"], bool)
 
         # Test mint should have at least some active keysets for sat
-        sat_keysets = [ks for ks in keysets if ks["unit"] == "sat"]
-        active_sat_keysets = [ks for ks in sat_keysets if ks["active"]]
+        sat_keysets: list[KeysetInfo] = [ks for ks in keysets if ks["unit"] == "sat"]
+        active_sat_keysets: list[KeysetInfo] = [
+            ks for ks in sat_keysets if ks["active"]
+        ]
         assert len(active_sat_keysets) > 0, "Should have at least one active sat keyset"
 
         print(f"✅ Found {len(keysets)} keysets")
 
-    async def test_get_keys_with_validation(self, mint):
+    async def test_get_keys_with_validation(self, mint: Mint) -> None:
         """Test retrieving mint public keys with NUT-01 validation."""
-        # Get without specific keyset ID (should return newest)
-        keys_resp = await mint.get_keys()
+        # Get active keysets with full details
+        keysets: list[Keyset] = await mint.get_active_keysets()
 
-        assert "keysets" in keys_resp
-        keysets = keys_resp["keysets"]
+        assert isinstance(keysets, list)
         assert len(keysets) > 0
 
         # Verify each keyset has proper structure
         for keyset in keysets:
-            assert mint._validate_keyset(keyset), f"Invalid keyset: {keyset}"
+            # Convert to dict for validation method
+            keyset_dict = dict(keyset)
+            assert mint._validate_keyset(keyset_dict), f"Invalid keyset: {keyset}"
 
             # Verify keys structure
             assert "keys" in keyset
-            keys = keyset["keys"]
+            keys: dict[str, str] = keyset["keys"]
             assert isinstance(keys, dict)
             assert len(keys) > 0, "Keyset should have public keys"
 
             # Verify each key is valid compressed secp256k1
             for amount_str, pubkey in keys.items():
                 # Amount should be valid
-                amount = int(amount_str)
+                amount: int = int(amount_str)
                 assert amount > 0
                 assert amount & (amount - 1) == 0  # Should be power of 2
 
                 # Pubkey should be valid compressed format
-                assert mint._is_valid_compressed_pubkey(pubkey)
+                assert len(pubkey) == 66  # 33 bytes = 66 hex chars
+                assert pubkey.startswith(("02", "03"))
 
-        # Test getting specific keyset
-        if keysets:
-            keyset_id = keysets[0]["id"]
-            specific_keys = await mint.get_keys(keyset_id)
-            assert "keysets" in specific_keys
-            assert len(specific_keys["keysets"]) >= 1
+                # Verify it's hex
+                try:
+                    bytes.fromhex(pubkey)
+                except ValueError:
+                    pytest.fail(f"Invalid hex pubkey: {pubkey}")
 
-        print(f"✅ Keys validation passed for {len(keysets)} keysets")
+        print(f"✅ Retrieved and validated keys for {len(keysets)} keysets")
 
-    async def test_validate_keysets_response(self, mint):
+    async def test_validate_keysets_response(self, mint: Mint) -> None:
         """Test the keyset validation methods with real data."""
-        keysets_resp = await mint.get_keysets()
+        keysets: list[KeysetInfo] = await mint.get_keysets_info()
 
-        # Test validation method
-        assert mint.validate_keysets_response(dict(keysets_resp))
+        # Test validation method on proper response format
+        response: dict[str, list[KeysetInfo]] = {"keysets": keysets}
+        assert mint.validate_keysets_response(response)
 
-        # Test get_validated_keysets method
-        validated_resp = await mint.get_validated_keysets()
-        assert "keysets" in validated_resp
-        assert len(validated_resp["keysets"]) > 0
+        # Test that we can get the full keyset details with keys
+        if keysets:
+            # Get full details for first keyset
+            keyset_full: Keyset = await mint.get_keyset(keysets[0]["id"])
+            assert keyset_full
+            assert "keys" in keyset_full
+            assert isinstance(keyset_full["keys"], dict)
 
         print("✅ Keyset validation methods work correctly")
 
@@ -169,11 +186,13 @@ class TestMintBasicOperations:
 class TestMintQuoteOperations:
     """Test mint quote operations against real mint."""
 
-    async def test_create_mint_quote(self, mint):
+    async def test_create_mint_quote(self, mint: Mint) -> PostMintQuoteResponse | None:
         """Test creating mint quotes for various amounts and units."""
         try:
             # Test basic quote creation
-            quote_resp = await mint.create_mint_quote(unit="sat", amount=100)
+            quote_resp: PostMintQuoteResponse = await mint.create_mint_quote(
+                unit="sat", amount=100
+            )
 
             assert "quote" in quote_resp
             assert "request" in quote_resp  # BOLT11 invoice
@@ -204,15 +223,17 @@ class TestMintQuoteOperations:
             else:
                 raise
 
-    async def test_get_mint_quote_status(self, mint):
+    async def test_get_mint_quote_status(self, mint: Mint) -> None:
         """Test checking mint quote status."""
         try:
             # Create a quote first
-            quote_resp = await mint.create_mint_quote(unit="sat", amount=50)
-            quote_id = quote_resp["quote"]
+            quote_resp: PostMintQuoteResponse = await mint.create_mint_quote(
+                unit="sat", amount=50
+            )
+            quote_id: str = quote_resp["quote"]
 
             # Check quote status
-            status = await mint.get_mint_quote(quote_id)
+            status: PostMintQuoteResponse = await mint.get_mint_quote(quote_id)
 
             assert "quote" in status
             assert "state" in status
@@ -228,18 +249,20 @@ class TestMintQuoteOperations:
             else:
                 raise
 
-    async def test_mint_quote_different_amounts(self, mint):
+    async def test_mint_quote_different_amounts(self, mint: Mint) -> None:
         """Test mint quotes for different amounts with rate limiting."""
-        amounts = [1, 10, 100, 1000]
+        amounts: list[int] = [1, 10, 100, 1000]
 
         for amount in amounts:
             try:
-                quote_resp = await mint.create_mint_quote(unit="sat", amount=amount)
+                quote_resp: PostMintQuoteResponse = await mint.create_mint_quote(
+                    unit="sat", amount=amount
+                )
                 assert quote_resp["amount"] == amount
                 print(f"✅ Created quote for {amount} sats")
                 await asyncio.sleep(1)  # Delay to avoid rate limiting
             except MintError as e:
-                error_msg = str(e).lower()
+                error_msg: str = str(e).lower()
                 # Some mints might have minimum amounts or rate limiting
                 if "minimum" in error_msg:
                     print(f"⚠️  Mint has minimum amount restriction for {amount} sats")
@@ -249,12 +272,12 @@ class TestMintQuoteOperations:
                 else:
                     raise
 
-    async def test_mint_quote_with_description(self, mint):
+    async def test_mint_quote_with_description(self, mint: Mint) -> None:
         """Test mint quote with description and optional fields."""
-        description = "Integration test payment"
+        description: str = "Integration test payment"
 
         try:
-            quote_resp = await mint.create_mint_quote(
+            quote_resp: PostMintQuoteResponse = await mint.create_mint_quote(
                 unit="sat", amount=25, description=description
             )
 
@@ -271,27 +294,29 @@ class TestMintQuoteOperations:
 class TestMeltQuoteOperations:
     """Test melt quote operations (may be limited without actual Lightning)."""
 
-    async def test_create_melt_quote_invalid_invoice(self, mint):
+    async def test_create_melt_quote_invalid_invoice(self, mint: Mint) -> None:
         """Test melt quote with invalid invoice (should fail gracefully)."""
-        invalid_invoice = "lnbc1000n1invalid"
+        invalid_invoice: str = "lnbc1000n1invalid"
 
         with pytest.raises(MintError) as exc_info:
             await mint.create_melt_quote(unit="sat", request=invalid_invoice)
 
         # Should get a reasonable error message
-        error_msg = str(exc_info.value).lower()
+        error_msg: str = str(exc_info.value).lower()
         assert any(
             word in error_msg for word in ["invalid", "bad", "bech32", "not valid"]
         )
         print("✅ Invalid invoice properly rejected")
 
-    async def test_melt_quote_structure(self, mint):
+    async def test_melt_quote_structure(self, mint: Mint) -> None:
         """Test melt quote response structure with a potentially valid invoice."""
         # Use a well-formed but likely expired/invalid invoice
-        test_invoice = "lnbc100n1pjqq5jqsp5l3l6t7k6z4t5r9m8s7q2w3e4r5t6y7u8i9o0p1l2k3j4h5g6f7s8dp9q7sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspp5qr3n6g5g4t6t7k8h9j0k1l2m3n4p5q6r7s8t9u0v1w2x3y4z5a6b7c8d9e0f1gq9qtzqqqqqq"
+        test_invoice: str = "lnbc100n1pjqq5jqsp5l3l6t7k6z4t5r9m8s7q2w3e4r5t6y7u8i9o0p1l2k3j4h5g6f7s8dp9q7sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspp5qr3n6g5g4t6t7k8h9j0k1l2m3n4p5q6r7s8t9u0v1w2x3y4z5a6b7c8d9e0f1gq9qtzqqqqqq"
 
         try:
-            quote_resp = await mint.create_melt_quote(unit="sat", request=test_invoice)
+            quote_resp: PostMeltQuoteResponse = await mint.create_melt_quote(
+                unit="sat", request=test_invoice
+            )
 
             # If it succeeds, verify structure
             assert "quote" in quote_resp
@@ -309,9 +334,9 @@ class TestMeltQuoteOperations:
 class TestTokenManagement:
     """Test token management operations."""
 
-    async def test_check_state_empty(self, mint):
+    async def test_check_state_empty(self, mint: Mint) -> None:
         """Test checking state with empty Y values."""
-        state_resp = await mint.check_state(Ys=[])
+        state_resp: PostCheckStateResponse = await mint.check_state(Ys=[])
 
         assert "states" in state_resp
         assert isinstance(state_resp["states"], list)
@@ -319,18 +344,18 @@ class TestTokenManagement:
 
         print("✅ Empty state check works correctly")
 
-    async def test_check_state_fake_proofs(self, mint):
+    async def test_check_state_fake_proofs(self, mint: Mint) -> None:
         """Test checking state with fake proof Y values."""
         # Generate some fake Y values (valid format but non-existent proofs)
-        fake_y_values = [
+        fake_y_values: list[str] = [
             "02" + "a1b2c3d4e5f6" * 10,  # 66 char hex string
             "03" + "f1e2d3c4b5a6" * 10,  # Another fake Y value
         ]
 
-        state_resp = await mint.check_state(Ys=fake_y_values)
+        state_resp: PostCheckStateResponse = await mint.check_state(Ys=fake_y_values)
 
         assert "states" in state_resp
-        states = state_resp["states"]
+        states: list[dict[str, str]] = state_resp["states"]
         assert len(states) == len(fake_y_values)
 
         # States should indicate these proofs don't exist
@@ -339,30 +364,32 @@ class TestTokenManagement:
 
         print(f"✅ Checked state for {len(fake_y_values)} fake Y values")
 
-    async def test_restore_empty(self, mint):
+    async def test_restore_empty(self, mint: Mint) -> None:
         """Test restore with empty outputs (should fail)."""
         with pytest.raises(MintError) as exc_info:
             await mint.restore(outputs=[])
 
         # Should get an error about no outputs provided
-        error_msg = str(exc_info.value).lower()
+        error_msg: str = str(exc_info.value).lower()
         assert any(word in error_msg for word in ["no outputs", "empty", "required"])
         print("✅ Empty restore properly rejected")
 
-    async def test_swap_validation_errors(self, mint):
+    async def test_swap_validation_errors(self, mint: Mint) -> None:
         """Test swap with invalid inputs (should fail)."""
-        # Create fake but properly structured inputs and outputs
-        fake_inputs = [
+        # Create fake but properly structured inputs
+        fake_inputs: list[Proof] = [
             {
                 "id": "00ad268c4d1f5826",
                 "amount": 10,
                 "secret": "fake_secret",
                 "C": "02a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+                "mint": "https://testnut.cashu.space",
+                "unit": "sat",
             }
         ]
 
         # Create blinded outputs for the same amount
-        fake_outputs = [
+        fake_outputs: list[BlindedMessage] = [
             BlindedMessage(
                 amount=10,
                 id="00ad268c4d1f5826",
@@ -371,10 +398,13 @@ class TestTokenManagement:
         ]
 
         with pytest.raises(MintError) as exc_info:
-            await mint.swap(inputs=fake_inputs, outputs=fake_outputs)
+            # Cast to ProofComplete since swap expects it (ProofComplete extends Proof with optional fields)
+            await mint.swap(
+                inputs=cast(list[ProofComplete], fake_inputs), outputs=fake_outputs
+            )
 
         # Should get a reasonable error (invalid proof, unknown secret, etc.)
-        error_msg = str(exc_info.value).lower()
+        error_msg: str = str(exc_info.value).lower()
         assert any(
             word in error_msg for word in ["invalid", "unknown", "proof", "secret"]
         )
@@ -384,28 +414,28 @@ class TestTokenManagement:
 class TestMintValidation:
     """Test mint validation methods with real data."""
 
-    async def test_keyset_validation_real_data(self, mint):
+    async def test_keyset_validation_real_data(self, mint: Mint) -> None:
         """Test keyset validation with real mint data."""
-        keysets_resp = await mint.get_keysets()
-        keysets = keysets_resp["keysets"]
+        keysets: list[KeysetInfo] = await mint.get_keysets_info()
 
         # All real keysets should pass validation
         for keyset in keysets:
-            assert mint.validate_keyset(keyset), (
+            # Convert to dict for validation method
+            keyset_dict = dict(keyset)
+            assert mint.validate_keyset(keyset_dict), (
                 f"Real keyset failed validation: {keyset}"
             )
 
         # Test the response validation
-        assert mint.validate_keysets_response(dict(keysets_resp))
+        assert mint.validate_keysets_response({"keysets": keysets})
 
         print(f"✅ All {len(keysets)} real keysets passed validation")
 
-    async def test_pubkey_validation_real_keys(self, mint):
+    async def test_pubkey_validation_real_keys(self, mint: Mint) -> None:
         """Test public key validation with real mint keys."""
-        keys_resp = await mint.get_keys()
-        keysets = keys_resp["keysets"]
+        keysets: list[Keyset] = await mint.get_active_keysets()
 
-        valid_count = 0
+        valid_count: int = 0
         for keyset in keysets:
             if "keys" in keyset:
                 for amount_str, pubkey in keyset["keys"].items():
@@ -421,7 +451,7 @@ class TestMintValidation:
 class TestMintErrorHandling:
     """Test error handling with real mint responses."""
 
-    async def test_invalid_endpoints(self, mint):
+    async def test_invalid_endpoints(self, mint: Mint) -> None:
         """Test requests to invalid endpoints."""
         with pytest.raises(MintError) as exc_info:
             await mint._request("GET", "/v1/nonexistent")
@@ -429,22 +459,22 @@ class TestMintErrorHandling:
         assert "404" in str(exc_info.value) or "400" in str(exc_info.value)
         print("✅ Invalid endpoint properly rejected")
 
-    async def test_invalid_keyset_id(self, mint):
+    async def test_invalid_keyset_id(self, mint: Mint) -> None:
         """Test requesting keys with invalid keyset ID."""
-        invalid_keyset_id = "invalid_id_123"
+        invalid_keyset_id: str = "invalid_id_123"
 
         with pytest.raises(MintError) as exc_info:
-            await mint.get_keys(invalid_keyset_id)
+            await mint.get_keyset(invalid_keyset_id)
 
-        error_msg = str(exc_info.value)
+        error_msg: str = str(exc_info.value)
         assert "400" in error_msg or "404" in error_msg
         print("✅ Invalid keyset ID properly rejected")
 
-    async def test_malformed_requests(self, mint):
+    async def test_malformed_requests(self, mint: Mint) -> None:
         """Test malformed request handling."""
         # Try to create quote with invalid unit
         with pytest.raises(Exception):  # Could be MintError or validation error
-            await mint.create_mint_quote(unit="invalid_unit", amount=100)
+            await mint.create_mint_quote(unit="invalid_unit", amount=100)  # type: ignore
 
         print("✅ Malformed requests properly handled")
 
@@ -452,10 +482,10 @@ class TestMintErrorHandling:
 class TestMintComplexOperations:
     """Test more complex mint operations and flows."""
 
-    async def test_multiple_concurrent_quotes(self, mint):
+    async def test_multiple_concurrent_quotes(self, mint: Mint) -> None:
         """Test creating multiple quotes with rate limit handling."""
 
-        async def create_quote_with_retry(amount: int) -> dict[str, Any]:
+        async def create_quote_with_retry(amount: int) -> PostMintQuoteResponse:
             for attempt in range(3):
                 try:
                     return await mint.create_mint_quote(unit="sat", amount=amount)
@@ -468,12 +498,12 @@ class TestMintComplexOperations:
             raise RuntimeError("All retry attempts failed")
 
         # Create quotes with small delays to avoid rate limiting
-        amounts = [10, 25, 50, 100]
-        quotes = []
+        amounts: list[int] = [10, 25, 50, 100]
+        quotes: list[PostMintQuoteResponse] = []
 
         for amount in amounts:
             try:
-                quote = await create_quote_with_retry(amount)
+                quote: PostMintQuoteResponse = await create_quote_with_retry(amount)
                 quotes.append(quote)
                 await asyncio.sleep(0.5)  # Small delay between requests
             except MintError as e:
@@ -484,7 +514,7 @@ class TestMintComplexOperations:
 
         if quotes:
             # Verify all quotes are unique
-            quote_ids = [q["quote"] for q in quotes]
+            quote_ids: list[str] = [q["quote"] for q in quotes]
             assert len(set(quote_ids)) == len(quote_ids), (
                 "All quote IDs should be unique"
             )
@@ -497,17 +527,19 @@ class TestMintComplexOperations:
                 "⚠️  All requests were rate limited - test passed (shows rate limiting works)"
             )
 
-    async def test_quote_status_polling(self, mint):
+    async def test_quote_status_polling(self, mint: Mint) -> None:
         """Test polling quote status over time with rate limit handling."""
         try:
             # Create a quote
-            quote_resp = await mint.create_mint_quote(unit="sat", amount=21)
-            quote_id = quote_resp["quote"]
+            quote_resp: PostMintQuoteResponse = await mint.create_mint_quote(
+                unit="sat", amount=21
+            )
+            quote_id: str = quote_resp["quote"]
 
             # Poll status a few times with delays
-            states = []
+            states: list[str] = []
             for i in range(3):
-                status = await mint.get_mint_quote(quote_id)
+                status: PostMintQuoteResponse = await mint.get_mint_quote(quote_id)
                 states.append(status["state"])
 
                 if i < 2:  # Don't wait after last check
@@ -523,18 +555,18 @@ class TestMintComplexOperations:
             else:
                 raise
 
-    async def test_keys_caching_behavior(self, mint):
+    async def test_keys_caching_behavior(self, mint: Mint) -> None:
         """Test that repeated key requests work correctly."""
         # Get keys multiple times
-        keys1 = await mint.get_keys()
-        keys2 = await mint.get_keys()
+        keys1: list[Keyset] = await mint.get_active_keysets()
+        keys2: list[Keyset] = await mint.get_active_keysets()
 
         # Should return consistent results
         assert keys1 == keys2
 
         # Get keysets multiple times
-        keysets1 = await mint.get_keysets()
-        keysets2 = await mint.get_keysets()
+        keysets1: list[KeysetInfo] = await mint.get_keysets_info()
+        keysets2: list[KeysetInfo] = await mint.get_keysets_info()
 
         # Should return consistent results
         assert keysets1 == keysets2
@@ -545,42 +577,43 @@ class TestMintComplexOperations:
 class TestMintPerformance:
     """Test mint performance and reliability."""
 
-    async def test_rapid_requests(self, mint):
+    async def test_rapid_requests(self, mint: Mint) -> None:
         """Test making rapid sequential requests."""
-        start_time = asyncio.get_event_loop().time()
+        start_time: float = asyncio.get_event_loop().time()
 
         # Make multiple rapid requests
-        tasks = []
+        tasks: list[Any] = []
         for _ in range(5):
             tasks.append(mint.get_info())
 
-        results = await asyncio.gather(*tasks)
+        results: list[MintInfo] = await asyncio.gather(*tasks)
 
-        end_time = asyncio.get_event_loop().time()
-        duration = end_time - start_time
+        end_time: float = asyncio.get_event_loop().time()
+        duration: float = end_time - start_time
 
         assert len(results) == 5
         assert all(isinstance(result, dict) for result in results)
 
         print(f"✅ Completed 5 concurrent requests in {duration:.2f}s")
 
-    async def test_connection_reuse(self, mint):
+    async def test_connection_reuse(self, mint: Mint) -> None:
         """Test that HTTP connections are properly reused."""
         # Make multiple requests that should reuse connections
-        info1 = await mint.get_info()
-        keysets = await mint.get_keysets()
-        info2 = await mint.get_info()
+        info1: MintInfo = await mint.get_info()
+        keysets: list[KeysetInfo] = await mint.get_keysets_info()
+        info2: MintInfo = await mint.get_info()
 
         assert isinstance(info1, dict)
-        assert isinstance(keysets, dict)
+        assert isinstance(keysets, list)
         assert isinstance(info2, dict)
 
         # Info should be mostly consistent (excluding time-sensitive fields)
-        info1_copy = dict(info1)
-        info2_copy = dict(info2)
+        info1_copy: dict[str, Any] = dict(info1)
+        info2_copy: dict[str, Any] = dict(info2)
 
         # Remove time-sensitive fields that may differ between requests
-        for time_field in ["time", "timestamp", "updated_at"]:
+        time_fields: list[str] = ["time", "timestamp", "updated_at"]
+        for time_field in time_fields:
             info1_copy.pop(time_field, None)
             info2_copy.pop(time_field, None)
 
@@ -601,20 +634,22 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Run a simple smoke test
-    async def main():
+    async def main() -> None:
         mint = Mint("https://testnut.cashu.space")
 
         try:
             print("🔄 Testing mint connection...")
-            info = await mint.get_info()
+            info: MintInfo = await mint.get_info()
             print(f"✅ Connected to mint: {info.get('name', 'Unknown')}")
 
             print("🔄 Testing keysets...")
-            keysets = await mint.get_keysets()
-            print(f"✅ Found {len(keysets['keysets'])} keysets")
+            keysets: list[Keyset] = await mint.get_active_keysets()
+            print(f"✅ Found {len(keysets)} keysets")
 
             print("🔄 Testing quote creation...")
-            quote = await mint.create_mint_quote(unit="sat", amount=100)
+            quote: PostMintQuoteResponse = await mint.create_mint_quote(
+                unit="sat", amount=100
+            )
             print(f"✅ Created quote: {quote['quote']}")
 
             print("✅ All basic tests passed!")

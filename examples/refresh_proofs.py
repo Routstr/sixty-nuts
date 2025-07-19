@@ -18,22 +18,29 @@ async def refresh_proofs(wallet: Wallet):
         print("❌ No proofs found in wallet!")
         return
 
-    print(f"Found {len(state.proofs)} proofs worth {state.balance} sats")
+    print(
+        f"Found {len(state.proofs)} proofs worth {await state.total_balance_sat()} sats"
+    )
 
-    print(f"Refreshing proofs at {len(state.proofs_by_mints)} mint(s)...")
+    print(f"Refreshing proofs at {len(state.proofs_by_mint)} mint(s)...")
 
-    for mint_url, mint_proofs in state.proofs_by_mints.items():
+    for mint_url, mint_proofs in state.proofs_by_mint.items():
         mint_balance = sum(p["amount"] for p in mint_proofs)
         print(f"\n📍 Processing {len(mint_proofs)} proofs at {mint_url}")
         print(f"   Balance: {mint_balance} sats")
 
         try:
+            # Get currency unit from the first proof
+            currency = mint_proofs[0].get("unit", "sat")
+
             # Calculate optimal denominations for consolidation
-            optimal_denoms = wallet._calculate_optimal_denominations(mint_balance)
+            optimal_denoms = await wallet._calculate_optimal_denominations(
+                mint_balance, mint_url, currency
+            )
 
             # Swap proofs for optimal denominations
             new_proofs = await wallet._swap_proof_denominations(
-                mint_proofs, optimal_denoms, mint_url
+                mint_proofs, optimal_denoms, mint_url, currency
             )
 
             print(f"   ✅ Refreshed to {len(new_proofs)} optimized proofs")
@@ -47,7 +54,7 @@ async def refresh_proofs(wallet: Wallet):
     # Verify final state
     print("\nVerifying final state...")
     final_state = await wallet.fetch_wallet_state(check_proofs=True)
-    print(f"Final balance: {final_state.balance} sats")
+    print(f"Final balance: {await final_state.total_balance_sat()} sats")
     print(f"Final proof count: {len(final_state.proofs)}")
 
 

@@ -4,7 +4,8 @@ import asyncio
 import os
 import shutil
 import time
-from typing import Annotated, Optional
+import json  # Add missing import
+from typing import Annotated, Optional, cast
 
 import typer
 from rich.console import Console
@@ -23,15 +24,22 @@ except ImportError:
 from .types import WalletError
 from .wallet import (
     Wallet,
+    CurrencyUnit,
+    Proof,
+)
+from .mint import (
     get_mints_from_env,
     validate_mint_url,
     POPULAR_MINTS,
-    MINTS_ENV_VAR,
     set_mints_in_env,
     clear_mints_from_env,
 )
+from .crypto import nip44_decrypt  # Add missing import
 from .temp import redeem_to_lnurl
-from .relay import prompt_user_for_relays, RELAYS_ENV_VAR
+from .relay import prompt_user_for_relays, RELAYS_ENV_VAR, EventKind
+
+# Update the environment variable name to match what's in mint.py
+MINTS_ENV_VAR = "CASHU_MINTS"
 
 app = typer.Typer(
     name="nuts",
@@ -394,7 +402,13 @@ async def create_wallet_with_mint_selection(
                 # Automatically save to Nostr wallet event
                 try:
                     async with wallet:
-                        await wallet.initialize_wallet(force=True)
+                        # Generate a new wallet privkey if not already set
+                        if wallet.wallet_privkey is None:
+                            wallet.wallet_privkey = wallet._generate_wallet_privkey()
+
+                        await wallet.event_manager.initialize_wallet(
+                            wallet.wallet_privkey, force=True
+                        )
                     console.print(
                         f"[green]✅ Wallet configured with {len(selected_mints)} mints and saved to Nostr![/green]"
                     )
@@ -675,6 +689,74 @@ def handle_wallet_error(e: Exception) -> None:
         console.print(f"[red]❌ Error: {e}[/red]")
 
 
+async def prompt_user_for_mint_and_keyset(
+    wallet,
+    mint_unit: "CurrencyUnit",
+) -> tuple[str, str]:
+    """Prompt user to select mint when multiple options are available.
+
+    Args:
+        wallet: Wallet instance
+        mint_unit: Currency unit to mint
+
+    Returns:
+        Tuple of (target_mint_url, keyset_id) - keyset_id is now just a placeholder
+
+    Raises:
+        typer.Exit: If user cancels selection or no valid options
+    """
+    # Since keysets are no longer exposed in the wallet, we'll just select a mint
+    console.print(f"\n[cyan]🏦 Select a mint for {mint_unit.upper()}[/cyan]")
+
+    # Get mints from wallet
+    available_mints = wallet.mint_urls
+
+    if not available_mints:
+        console.print("[red]No mints configured[/red]")
+        raise typer.Exit(1)
+
+    # If only one mint, use it automatically
+    if len(available_mints) == 1:
+        return available_mints[0], "default"
+
+    # Multiple mints - prompt user to choose
+    console.print(f"Found {len(available_mints)} mints:")
+
+    # Create selection table
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Mint URL", style="green")
+
+    for i, mint_url in enumerate(available_mints, 1):
+        table.add_row(str(i), mint_url)
+
+    console.print(table)
+
+    # Prompt for selection
+    while True:
+        try:
+            choice = Prompt.ask(
+                f"\nSelect mint for {mint_unit.upper()} minting", default="1"
+            )
+
+            if choice.isdigit():
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(available_mints):
+                    selected_mint = available_mints[choice_num - 1]
+                    console.print(f"[green]✅ Selected: {selected_mint}[/green]")
+                    return selected_mint, "default"
+                else:
+                    console.print(
+                        f"[red]Invalid choice. Please enter 1-{len(available_mints)}[/red]"
+                    )
+            else:
+                console.print("[red]Please enter a number[/red]")
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Selection cancelled[/yellow]")
+            raise typer.Exit(1)
+
+
 async def _debug_nostr_state(wallet: Wallet) -> None:
     """Debug Nostr relay state and proof storage."""
     from datetime import datetime
@@ -686,8 +768,8 @@ async def _debug_nostr_state(wallet: Wallet) -> None:
     # 1. Show wallet configuration
     console.print("\n[yellow]📋 Wallet Configuration:[/yellow]")
     console.print(f"  Public Key: {wallet._get_pubkey()}")
-    console.print(f"  Configured Relays: {len(wallet.relays)}")
-    for i, relay in enumerate(wallet.relays):
+    console.print(f"  Configured Relays: {len(wallet.relay_urls)}")
+    for i, relay in enumerate(wallet.relay_urls):
         console.print(f"    {i + 1}. {relay}")
 
     # 2. Check relay connectivity
@@ -798,15 +880,49 @@ async def _debug_nostr_state(wallet: Wallet) -> None:
                             if content:
                                 # Try to decrypt if encrypted
                                 try:
-                                    decrypted = wallet._nip44_decrypt(content)
+                                    decrypted = nip44_decrypt(content, wallet._privkey)
                                     token_data = json.loads(decrypted)
                                     proofs = token_data.get("proofs", [])
                                     mint_url = token_data.get("mint", "unknown")
-                                    total_amount = sum(
-                                        p.get("amount", 0) for p in proofs
+
+                                    # Group by unit to show proper amounts
+                                    unit_amounts: dict[str, int] = {}
+                                    for p in proofs:
+                                        unit = p.get("unit", p.get("u", "sat"))
+                                        amount = p.get("amount", 0)
+                                        unit_amounts[unit] = (
+                                            unit_amounts.get(unit, 0) + amount
+                                        )
+
+                                    # Format unit display
+                                    unit_parts = []
+                                    for unit, amount in sorted(unit_amounts.items()):
+                                        if unit in [
+                                            "usd",
+                                            "eur",
+                                            "gbp",
+                                            "cad",
+                                            "chf",
+                                            "aud",
+                                            "jpy",
+                                            "cny",
+                                            "inr",
+                                            "usdt",
+                                            "usdc",
+                                            "dai",
+                                        ]:
+                                            display_amount = amount / 100
+                                            unit_parts.append(
+                                                f"{display_amount:.2f} {unit}"
+                                            )
+                                        else:
+                                            unit_parts.append(f"{amount} {unit}")
+                                    amount_str = (
+                                        ", ".join(unit_parts) if unit_parts else "0"
                                     )
+
                                     console.print(
-                                        f"       → {len(proofs)} proofs, {total_amount} sats from {mint_url}"
+                                        f"       → {len(proofs)} proofs, {amount_str} from {mint_url}"
                                     )
                                 except Exception:
                                     console.print(
@@ -816,59 +932,8 @@ async def _debug_nostr_state(wallet: Wallet) -> None:
                             console.print(f"       → Parse error: {e}")
         else:
             console.print("  No events found on any relay")
-
-        # 5. Check relay queue status
-        if wallet.relay_manager.use_queued_relays and wallet.relay_manager.relay_pool:
-            console.print("\n[yellow]📤 Relay Queue Status:[/yellow]")
-            try:
-                pending_proofs = wallet.relay_manager.relay_pool.get_pending_proofs()
-                console.print(f"  Pending Proofs in Queue: {len(pending_proofs)}")
-
-                if pending_proofs:
-                    total_pending_sats = 0
-                    for token_data in pending_proofs:
-                        proofs = token_data.get("proofs", [])
-                        mint_url = token_data.get("mint", "unknown")
-                        amount = sum(p.get("amount", 0) for p in proofs)
-                        total_pending_sats += amount
-                        console.print(
-                            f"    Mint {mint_url}: {len(proofs)} proofs, {amount} sats"
-                        )
-
-                    console.print(f"  Total Pending Value: {total_pending_sats} sats")
-                    console.print(
-                        "  ⚠️  These sats might be 'missing' until queue is processed!"
-                    )
-
-            except Exception as e:
-                console.print(f"  ❌ Queue status error: {e}")
-
-        # 6. Compare with local state
-        console.print("\n[yellow]🔄 Local vs Relay Comparison:[/yellow]")
-        try:
-            local_state = await wallet.fetch_wallet_state(check_proofs=False)
-            console.print(f"  Local Balance: {local_state.balance} sats")
-            console.print(f"  Local Proofs: {len(local_state.proofs)}")
-
-            # Show denomination breakdown
-            local_denoms: dict[int, int] = {}
-            for proof in local_state.proofs:
-                amount = proof.get("amount", 0)
-                local_denoms[amount] = local_denoms.get(amount, 0) + 1
-
-            if local_denoms:
-                console.print("  Local Denominations:")
-                for denom in sorted(local_denoms.keys(), reverse=True):
-                    count = local_denoms[denom]
-                    console.print(f"    {denom} sats × {count} = {denom * count} sats")
-
-        except Exception as e:
-            console.print(f"  ❌ Local state error: {e}")
-
     except Exception as e:
-        console.print(f"❌ Nostr debugging failed: {e}")
-
-    console.print("\n" + "=" * 50)
+        console.print(f"  ❌ Error fetching events: {e}")
 
 
 @app.command()
@@ -886,10 +951,17 @@ def balance(
         bool,
         typer.Option("--nostr-debug", help="Show detailed Nostr relay debugging info"),
     ] = False,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Filter by currency unit (sat, usd, eur, etc.)"
+        ),
+    ] = None,
 ) -> None:
-    """Check wallet balance."""
+    """Check wallet balance across all currencies and keysets."""
 
     async def _balance() -> None:
+        nonlocal unit  # Explicitly declare we're using the outer scope variable
         nsec = get_nsec()
         # Use create_wallet_with_mint_selection for automatic mint discovery and selection
         wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
@@ -899,56 +971,186 @@ def balance(
             if nostr_debug:
                 await _debug_nostr_state(wallet)
 
-            if validate:
-                balance_amount = await wallet.get_balance(check_proofs=True)
-                console.print(
-                    f"[green]✅ Validated Balance: {balance_amount} sats[/green]"
-                )
+            # Get the enhanced wallet state with keyset info
+            state = await wallet.fetch_wallet_state(check_proofs=validate)
+
+            # Filter by unit if specified
+            filter_unit = unit  # Capture outer scope variable
+            if filter_unit:
+                unit_cast = cast(CurrencyUnit, filter_unit)
+                if unit_cast in state.balance_by_unit:
+                    unit_balance = state.balance_by_unit[unit_cast]
+                    # Convert from base units to user-friendly units for display
+                    if unit_cast in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        # For fiat and stablecoins, convert from cents to dollars
+                        display_balance = unit_balance / 100
+                        console.print(
+                            f"[green]✅ {unit_cast.upper()} Balance: {display_balance:.2f} {unit_cast}[/green]"
+                        )
+                    else:
+                        console.print(
+                            f"[green]✅ {unit_cast.upper()} Balance: {unit_balance} {unit_cast}[/green]"
+                        )
+                else:
+                    console.print(f"[yellow]No balance in {unit_cast.upper()}[/yellow]")
+                    return
             else:
-                balance_amount = await wallet.get_balance(check_proofs=False)
-                console.print(
-                    f"[yellow]📊 Quick Balance: {balance_amount} sats[/yellow]"
-                )
-                console.print("[dim](not validated with mint)[/dim]")
+                # Show all currency balances
+                console.print("[green]✅ Balance by Currency:[/green]")
+
+                if not state.balance_by_unit:
+                    console.print("[yellow]No balance found[/yellow]")
+                    return
+
+                # Create currency table
+                currency_table = Table(title="Currency Balances")
+                currency_table.add_column("Currency", style="cyan")
+                currency_table.add_column("Balance", style="green")
+                currency_table.add_column("Approx USD", style="yellow")
+
+                for currency, balance in state.balance_by_unit.items():
+                    # Simple USD approximation (in production, use real exchange rates)
+                    usd_value = ""
+                    if currency == "sat":
+                        # Assume 1 BTC = $50,000 for example
+                        usd_value = f"~${balance * 50000 / 100_000_000:.2f}"
+                    elif currency == "usd":
+                        usd_value = f"${balance / 100:.2f}"  # Assuming cents
+                    elif currency == "eur":
+                        usd_value = (
+                            f"~${balance * 1.1 / 100:.2f}"  # Assuming EUR/USD = 1.1
+                        )
+
+                    # Convert from base units to user-friendly display
+                    if currency in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        # For fiat and stablecoins, show as dollars/euros/etc with 2 decimal places
+                        display_balance = balance / 100
+                        currency_table.add_row(
+                            currency.upper(),
+                            f"{display_balance:.2f} {currency}",
+                            usd_value,
+                        )
+                    else:
+                        currency_table.add_row(
+                            currency.upper(), f"{balance} {currency}", usd_value
+                        )
+
+                console.print(currency_table)
 
             if details:
-                state = await wallet.fetch_wallet_state(check_proofs=validate)
+                # Create mint balance table
+                mint_table = Table(title="Mint Details")
+                mint_table.add_column("Mint", style="blue")
+                mint_table.add_column("Balance", style="green")
+                mint_table.add_column("Proofs", style="magenta")
 
-                # Create table for mint breakdown
-                table = Table(title="Wallet Details")
-                table.add_column("Mint", style="cyan")
-                table.add_column("Balance", style="green")
-                table.add_column("Proofs", style="blue")
-                table.add_column("Denominations", style="magenta")
-
-                # Group proofs by mint
-                proofs_by_mint: dict[str, list] = {}
+                # Group proofs by mint and currency
+                mint_currency_balances: dict[str, dict[str, tuple[int, int]]] = {}
                 for proof in state.proofs:
-                    mint_url = proof.get("mint") or "unknown"
-                    if mint_url not in proofs_by_mint:
-                        proofs_by_mint[mint_url] = []
-                    proofs_by_mint[mint_url].append(proof)
+                    mint_url = proof["mint"]
+                    unit = cast(CurrencyUnit, proof["unit"])
+                    amount = proof["amount"]
 
-                for mint_url, proofs in proofs_by_mint.items():
-                    mint_balance = sum(p["amount"] for p in proofs)
-                    # Get denomination breakdown
-                    denominations: dict[int, int] = {}
-                    for proof in proofs:
-                        amount = proof["amount"]
-                        denominations[amount] = denominations.get(amount, 0) + 1
+                    if mint_url not in mint_currency_balances:
+                        mint_currency_balances[mint_url] = {}
+                    if unit not in mint_currency_balances[mint_url]:
+                        mint_currency_balances[mint_url][unit] = (0, 0)
 
-                    denom_str = ", ".join(
-                        f"{amt}×{count}" for amt, count in sorted(denominations.items())
+                    balance, count = mint_currency_balances[mint_url][unit]
+                    mint_currency_balances[mint_url][unit] = (
+                        balance + amount,
+                        count + 1,
                     )
 
-                    table.add_row(
-                        mint_url[:30] + "..." if len(mint_url) > 33 else mint_url,
-                        f"{mint_balance} sats",
-                        str(len(proofs)),
-                        denom_str,
+                # Display mint details
+                for mint_url, currency_balances in mint_currency_balances.items():
+                    # Truncate mint URL for display
+                    mint_display = (
+                        mint_url[:40] + "..." if len(mint_url) > 43 else mint_url
                     )
 
-                console.print(table)
+                    # Format balance string with all currencies
+                    balance_parts = []
+                    total_proofs = 0
+                    for currency_unit, (balance, count) in currency_balances.items():
+                        balance_parts.append(f"{balance} {currency_unit}")
+                        total_proofs += count
+
+                    balance_str = ", ".join(balance_parts)
+
+                    mint_table.add_row(
+                        mint_display,
+                        balance_str,
+                        str(total_proofs),
+                    )
+
+                console.print("\n")
+                console.print(mint_table)
+
+                # Show denomination breakdown per mint if requested
+                if typer.confirm("\nShow denomination breakdown?", default=False):
+                    for mint_url, mint_proofs in state.proofs_by_mint.items():
+                        if mint_proofs:
+                            console.print(f"\n[cyan]Mint {mint_url[:40]}...:[/cyan]")
+
+                            # Group by currency first
+                            currency_groups: dict[str, list[Proof]] = {}
+                            for proof in mint_proofs:
+                                proof_unit = cast(CurrencyUnit, proof["unit"])
+                                if proof_unit not in currency_groups:
+                                    currency_groups[proof_unit] = []
+                                currency_groups[proof_unit].append(proof)
+
+                            # Show denominations for each currency
+                            for currency_unit, unit_proofs in currency_groups.items():
+                                if len(currency_groups) > 1:
+                                    console.print(
+                                        f"  [yellow]{currency_unit.upper()}:[/yellow]"
+                                    )
+
+                                denominations: dict[int, int] = {}
+                                for proof in unit_proofs:
+                                    amount = proof["amount"]
+                                    denominations[amount] = (
+                                        denominations.get(amount, 0) + 1
+                                    )
+
+                                for denom in sorted(denominations.keys()):
+                                    count = denominations[denom]
+                                    if len(currency_groups) > 1:
+                                        console.print(
+                                            f"    {denom} × {count} = {denom * count}"
+                                        )
+                                    else:
+                                        console.print(
+                                            f"  {denom} × {count} = {denom * count}"
+                                        )
 
     try:
         asyncio.run(_balance())
@@ -959,7 +1161,9 @@ def balance(
 
 @app.command()
 def send(
-    amount: Annotated[int, typer.Argument(help="Amount to send in sats")],
+    amount: Annotated[
+        int, typer.Argument(help="Amount to send (in specified unit or sats)")
+    ],
     mint_urls: Annotated[
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
@@ -970,72 +1174,138 @@ def send(
         Optional[str],
         typer.Option("--to-lnurl", help="Send directly to LNURL or Lightning address"),
     ] = None,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Currency unit to send from (sat, usd, eur, etc.)"
+        ),
+    ] = None,
+    keyset: Annotated[
+        Optional[str],
+        typer.Option("--keyset", "-k", help="Specific keyset ID to send from"),
+    ] = None,
 ) -> None:
-    """Send sats - create a Cashu token or send to Lightning address.
+    """Send tokens from wallet.
 
-    Create a token:
-        nuts send 1000
-
-    Send to Lightning address:
-        nuts send --to-lnurl user@getalby.com 1000
+    Examples:
+        Send 100 sats: nuts send 100
+        Send 50 USD: nuts send 50 --unit usd
+        Send from specific keyset: nuts send 100 --keyset abc123...
+        Send to Lightning: nuts send 100 --to-lnurl user@getalby.com
     """
 
-    async def _send():
+    async def _send() -> None:
         nsec = get_nsec()
         # Use create_wallet_with_mint_selection for automatic mint discovery and selection
         wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+
         async with wallet:
+            # Get wallet state to check balances
+            state = await wallet.fetch_wallet_state(check_proofs=False)
+
+            # Determine which unit to use (default to "sat" if not specified)
+            send_unit: CurrencyUnit = cast(CurrencyUnit, unit) if unit else "sat"
+
+            # Check if we have balance in that unit
+            if send_unit not in state.balance_by_unit:
+                console.print(f"[red]No balance in {send_unit.upper()}[/red]")
+                console.print("\nAvailable currencies:")
+                for curr, bal in state.balance_by_unit.items():
+                    console.print(f"  {curr.upper()}: {bal} {curr}")
+                return
+
+            unit_balance = state.balance_by_unit[send_unit]
+
             if to_lnurl:
                 # Send directly to Lightning address
-                console.print(f"[blue]Sending {amount} sats to {to_lnurl}...[/blue]")
+                console.print(
+                    f"[blue]Sending {amount} {send_unit} to {to_lnurl}...[/blue]"
+                )
 
-                # Check balance first
-                balance = await wallet.get_balance()
-                if balance <= amount:
-                    console.print(
-                        f"[red]Insufficient balance! Need >{amount}, have {balance}[/red]"
+                # Check balance first (need extra for fees)
+                send_amount_base = wallet._convert_to_base_unit(amount, send_unit)
+                if unit_balance <= send_amount_base:
+                    # Convert balance to display units for error message
+                    display_balance = wallet._convert_from_base_unit(
+                        unit_balance, send_unit
                     )
                     console.print(
-                        "[dim]Lightning payments require fees (typically 1 sat)[/dim]"
+                        f"[red]Insufficient balance! Need >{amount}, have {display_balance:.2f} {send_unit}[/red]"
+                    )
+                    console.print(
+                        "[dim]Lightning payments require fees (typically 1%)[/dim]"
                     )
                     return
 
-                actual_paid = await wallet.send_to_lnurl(to_lnurl, amount)
+                # Note: keyset-specific sending is no longer supported in the refactored wallet
+                if keyset:
+                    console.print(
+                        "[yellow]Warning: Keyset-specific sending is no longer supported[/yellow]"
+                    )
+
+                actual_paid = await wallet.send_to_lnurl(
+                    to_lnurl, send_amount_base, unit=send_unit
+                )
 
                 console.print("[green]✅ Successfully sent![/green]")
-                console.print(f"Total paid (including fees): {actual_paid} sats")
+                console.print(f"Total paid (including fees): {actual_paid} {send_unit}")
 
                 # Show remaining balance
-                balance = await wallet.get_balance()
-                console.print(f"Remaining balance: {balance} sats")
+                new_state = await wallet.fetch_wallet_state(check_proofs=False)
+                new_balance = new_state.balance_by_unit.get(send_unit, 0)
+                console.print(f"Remaining balance: {new_balance} {send_unit}")
 
             else:
                 # Create Cashu token
-                console.print(f"[blue]Creating token for {amount} sats...[/blue]")
+                console.print(
+                    f"[blue]Creating token for {amount} {send_unit}...[/blue]"
+                )
 
-                # Check balance first
-                balance = await wallet.get_balance()
-                if balance < amount:
+                # Check balance (convert amount to base units for comparison)
+                send_amount_base = wallet._convert_to_base_unit(amount, send_unit)
+                if unit_balance < send_amount_base:
+                    # Convert balance to display units for error message
+                    display_balance = wallet._convert_from_base_unit(
+                        unit_balance, send_unit
+                    )
                     console.print(
-                        f"[red]Insufficient balance! Need {amount}, have {balance}[/red]"
+                        f"[red]Insufficient balance! Need {amount}, have {display_balance:.2f} {send_unit}[/red]"
                     )
                     return
 
-                token = await wallet.send(amount)
+                # Note: keyset-specific sending is no longer supported in the refactored wallet
+                if keyset:
+                    console.print(
+                        "[yellow]Warning: Keyset-specific sending is no longer supported[/yellow]"
+                    )
 
-                console.print("\n[green]✅ Cashu Token Created:[/green]")
+                # Convert amount to base units if needed
+                send_amount = wallet._convert_to_base_unit(amount, send_unit)
+
+                # Use the first mint URL if provided via command line
+                target_mint_url = mint_urls[0] if mint_urls else None
+                token = await wallet.send(
+                    send_amount, mint_url=target_mint_url, unit=send_unit
+                )
+
+                console.print(
+                    f"\n[green]✅ Cashu Token Created ({amount} {send_unit}):[/green]"
+                )
                 # Display token without line wrapping for easy copying
                 console.print(token, soft_wrap=True, no_wrap=True)
 
                 # Display QR code unless disabled
                 if not no_qr:
-                    display_qr_code(token, f"Cashu Token ({amount} sats)")
+                    display_qr_code(token, f"Cashu Token ({amount} {send_unit})")
                 else:
                     console.print()
 
                 # Show remaining balance
-                balance = await wallet.get_balance()
-                console.print(f"[dim]Remaining balance: {balance} sats[/dim]")
+                new_state = await wallet.fetch_wallet_state(check_proofs=False)
+                new_balance = new_state.balance_by_unit.get(send_unit, 0)
+                console.print(
+                    f"[dim]Remaining balance: {new_balance} {send_unit}[/dim]"
+                )
 
     try:
         asyncio.run(_send())
@@ -1155,7 +1425,9 @@ def pay(
 
 @app.command()
 def mint(
-    amount: Annotated[int, typer.Argument(help="Amount to mint in sats")],
+    amount: Annotated[
+        int, typer.Argument(help="Amount to mint (in specified unit or sats)")
+    ],
     mint_urls: Annotated[
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
@@ -1165,39 +1437,181 @@ def mint(
     no_qr: Annotated[
         bool, typer.Option("--no-qr", help="Don't display QR code")
     ] = False,
+    unit: Annotated[
+        Optional[str],
+        typer.Option(
+            "--unit", "-u", help="Currency unit to mint (sat, usd, eur, etc.)"
+        ),
+    ] = None,
+    keyset: Annotated[
+        Optional[str],
+        typer.Option("--keyset", "-k", help="Specific keyset ID to mint with"),
+    ] = None,
 ) -> None:
-    """Create Lightning invoice to mint new tokens."""
+    """Create Lightning invoice to mint new tokens.
 
-    async def _mint():
+    Examples:
+        Mint 1000 sats: nuts mint 1000
+        Mint 50 USD: nuts mint 50 --unit usd
+        Mint with specific keyset: nuts mint 100 --keyset abc123...
+    """
+
+    async def _mint() -> None:
         nsec = get_nsec()
         # Use create_wallet_with_mint_selection for automatic mint discovery and selection
         wallet = await create_wallet_with_mint_selection(nsec=nsec, mint_urls=mint_urls)
+
+        # Determine which unit to mint (default to "sat" if not specified)
+        mint_unit: CurrencyUnit = cast(CurrencyUnit, unit) if unit else "sat"
+
         async with wallet:
-            console.print(f"[blue]Creating invoice for {amount} sats...[/blue]")
+            # If keyset specified, show warning that this is no longer supported
+            if keyset:
+                console.print(
+                    "[yellow]Warning: Keyset-specific minting is no longer supported in the refactored wallet[/yellow]"
+                )
+                console.print(
+                    "[dim]The wallet will automatically select the best mint for your request[/dim]"
+                )
 
-            invoice, task = await wallet.mint_async(amount, timeout=timeout)
+            console.print(f"[blue]Checking which mints support {mint_unit}...[/blue]")
 
-            # Display invoice for easy copying
-            console.print("\n[yellow]⚡ Lightning Invoice:[/yellow]")
-            # Display invoice without line wrapping for easy copying
-            console.print(invoice, soft_wrap=False, no_wrap=True, overflow="ignore")
+            # Find mints that support the requested currency unit
+            supporting_mints = await wallet.get_mints_supporting_unit(mint_unit)
 
-            # Display QR code unless disabled
-            if not no_qr:
-                display_qr_code(invoice, "Lightning Invoice QR Code")
+            if not supporting_mints:
+                console.print(
+                    f"[red]❌ No configured mints support {mint_unit.upper()}![/red]"
+                )
+                console.print("\nConfigured mints:")
+                for mint in wallet.mint_urls:
+                    console.print(f"  • {mint}")
+                console.print(
+                    f"\n[yellow]💡 Try adding a mint that supports {mint_unit.upper()}[/yellow]"
+                )
+                return
+
+            # Determine which mint to use
+            target_mint_url = None
+
+            # If --mint was specified, check if it supports the unit
+            if mint_urls:
+                specified_mint = mint_urls[0]
+                if specified_mint in supporting_mints:
+                    target_mint_url = specified_mint
+                else:
+                    console.print(
+                        f"[red]❌ {specified_mint} does not support {mint_unit.upper()}![/red]"
+                    )
+                    console.print(f"\nMints that support {mint_unit.upper()}:")
+                    for mint in supporting_mints:
+                        console.print(f"  • {mint}")
+                    return
+            elif len(supporting_mints) == 1:
+                # Only one mint supports this unit, use it automatically
+                target_mint_url = supporting_mints[0]
+                console.print(
+                    f"[dim]Using mint: {target_mint_url} (only mint supporting {mint_unit.upper()})[/dim]"
+                )
             else:
-                console.print()
+                # Multiple mints support this unit, prompt user to select
+                console.print(
+                    f"\n[cyan]Multiple mints support {mint_unit.upper()}:[/cyan]"
+                )
 
-            console.print("[blue]Waiting for payment...[/blue]")
+                table = Table(show_header=True, header_style="bold cyan")
+                table.add_column("#", style="dim", width=3)
+                table.add_column("Mint URL", style="green")
 
-            paid = await task
+                for i, mint_url in enumerate(supporting_mints, 1):
+                    table.add_row(str(i), mint_url)
 
-            if paid:
-                console.print("[green]✅ Payment received! Tokens minted.[/green]")
-                balance = await wallet.get_balance()
-                console.print(f"New balance: {balance} sats")
-            else:
-                console.print(f"[red]❌ Payment timeout after {timeout} seconds[/red]")
+                console.print(table)
+
+                while True:
+                    choice = Prompt.ask(
+                        f"\nSelect mint for {mint_unit.upper()} minting", default="1"
+                    )
+
+                    if choice.isdigit():
+                        choice_num = int(choice)
+                        if 1 <= choice_num <= len(supporting_mints):
+                            target_mint_url = supporting_mints[choice_num - 1]
+                            console.print(
+                                f"[green]✅ Selected: {target_mint_url}[/green]"
+                            )
+                            break
+                        else:
+                            console.print(
+                                f"[red]Invalid choice. Please enter 1-{len(supporting_mints)}[/red]"
+                            )
+                    else:
+                        console.print("[red]Please enter a number[/red]")
+
+            console.print(
+                f"\n[blue]Creating invoice for {amount} {mint_unit}...[/blue]"
+            )
+
+            try:
+                # Create mint quote with the specified currency
+                invoice, task = await wallet.mint_async(
+                    amount,
+                    mint_url=target_mint_url,
+                    unit=mint_unit,
+                    timeout=timeout,
+                )
+
+                # Display invoice for easy copying
+                console.print(
+                    f"\n[yellow]⚡ Lightning Invoice ({amount} {mint_unit}):[/yellow]"
+                )
+                # Display invoice without line wrapping so it can be copied completely
+                console.print(invoice, soft_wrap=True, no_wrap=True)
+
+                # Display QR code unless disabled
+                if not no_qr:
+                    display_qr_code(
+                        invoice, f"Lightning Invoice ({amount} {mint_unit})"
+                    )
+                else:
+                    console.print()
+
+                console.print("[blue]Waiting for payment...[/blue]")
+                console.print("[dim]Press Ctrl+C to cancel and return to CLI[/dim]")
+
+                try:
+                    paid = await task
+
+                    if paid:
+                        console.print(
+                            f"[green]✅ Payment received! {amount} {mint_unit} minted.[/green]"
+                        )
+
+                        # Show updated balance
+                        state = await wallet.fetch_wallet_state(check_proofs=False)
+                        if mint_unit in state.balance_by_unit:
+                            new_balance = state.balance_by_unit[mint_unit]
+                            console.print(
+                                f"New {mint_unit.upper()} balance: {new_balance} {mint_unit}"
+                            )
+                    else:
+                        console.print(
+                            f"[red]❌ Payment timeout after {timeout} seconds[/red]"
+                        )
+                        console.print(
+                            "[yellow]Invoice is still valid - you can pay it later[/yellow]"
+                        )
+
+                except Exception as payment_error:
+                    console.print(
+                        f"[red]❌ Payment polling error: {payment_error}[/red]"
+                    )
+                    console.print(
+                        "[yellow]Invoice may still be valid - check with your Lightning wallet[/yellow]"
+                    )
+            except Exception as e:
+                console.print(f"[red]❌ Failed to create invoice: {e}[/red]")
+                raise
 
     try:
         asyncio.run(_mint())
@@ -1212,7 +1626,7 @@ def info(
         Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
     ] = None,
 ) -> None:
-    """Show wallet information."""
+    """Show comprehensive wallet information including currencies."""
 
     async def _info():
         nsec = get_nsec()
@@ -1231,18 +1645,48 @@ def info(
 
             # Basic info
             table.add_row("Public Key", wallet._get_pubkey())
-            table.add_row("Currency", wallet.currency)
-            table.add_row("Balance", f"{state.balance} sats")
             table.add_row("Total Proofs", str(len(state.proofs)))
 
+            # Currency breakdown
+            if state.balance_by_unit:
+                table.add_row("", "")  # Empty row for spacing
+                table.add_row("[bold]Currency Balances[/bold]", "")
+                for currency, balance in sorted(state.balance_by_unit.items()):
+                    # Format based on currency type
+                    if currency in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        display_balance = balance / 100
+                        table.add_row(
+                            f"  {currency.upper()}", f"{display_balance:.2f} {currency}"
+                        )
+                    else:
+                        table.add_row(f"  {currency.upper()}", f"{balance} {currency}")
+
             # Mint info
+            table.add_row("", "")  # Empty row for spacing
+            table.add_row("[bold]Mints[/bold]", "")
             table.add_row("Configured Mints", str(len(wallet.mint_urls)))
+
             for i, mint_url in enumerate(wallet.mint_urls):
                 table.add_row(f"  Mint {i + 1}", mint_url)
 
             # Relay info
-            table.add_row("Configured Relays", str(len(wallet.relays)))
-            for i, relay_url in enumerate(wallet.relays):
+            table.add_row("", "")  # Empty row for spacing
+            table.add_row("[bold]Relays[/bold]", "")
+            table.add_row("Configured Relays", str(len(wallet.relay_urls)))
+            for i, relay_url in enumerate(wallet.relay_urls):
                 table.add_row(f"  Relay {i + 1}", relay_url)
 
             console.print(table)
@@ -1442,15 +1886,15 @@ def relays(
                 )
                 return
 
-            from .relay import NostrRelay
+            from .relay import Relay
 
             for i, relay_url in enumerate(test_relays, 1):
                 console.print(f"  {i}. Testing {relay_url}...")
                 try:
-                    relay = NostrRelay(relay_url)
-                    await relay.connect()
+                    relay_client = Relay(relay_url)
+                    await relay_client.connect()
                     console.print("     [green]✅ Connected successfully[/green]")
-                    await relay.disconnect()
+                    await relay_client.disconnect()
                 except Exception as e:
                     console.print(f"     [red]❌ Failed: {e}[/red]")
 
@@ -1519,7 +1963,10 @@ def status(
             )
             async with wallet_obj:
                 # Check if wallet exists
-                exists, existing_event = await wallet_obj.check_wallet_event_exists()
+                (
+                    exists,
+                    existing_event,
+                ) = await wallet_obj.event_manager.check_wallet_event_exists()
 
                 # Handle initialization if requested
                 if init:
@@ -1536,12 +1983,22 @@ def status(
                         console.print("   Use --force to create a new wallet event")
                     else:
                         # Initialize wallet (create event)
+                        # Generate a new wallet privkey if not already set
+                        if wallet_obj.wallet_privkey is None:
+                            wallet_obj.wallet_privkey = (
+                                wallet_obj._generate_wallet_privkey()
+                            )
+
                         if force:
                             console.print("🔄 Force creating new wallet event...")
-                            created = await wallet_obj.initialize_wallet(force=True)
+                            created = await wallet_obj.event_manager.initialize_wallet(
+                                wallet_obj.wallet_privkey, force=True
+                            )
                         else:
                             console.print("🔄 Creating wallet event...")
-                            created = await wallet_obj.initialize_wallet(force=False)
+                            created = await wallet_obj.event_manager.initialize_wallet(
+                                wallet_obj.wallet_privkey, force=False
+                            )
 
                         if created:
                             console.print(
@@ -1551,7 +2008,7 @@ def status(
                             (
                                 exists,
                                 existing_event,
-                            ) = await wallet_obj.check_wallet_event_exists()
+                            ) = await wallet_obj.event_manager.check_wallet_event_exists()
                         else:
                             console.print("[yellow]ℹ️ Wallet already existed[/yellow]")
                 else:
@@ -1568,7 +2025,9 @@ def status(
 
                     # Try to decrypt wallet content to show configuration
                     try:
-                        content = wallet_obj._nip44_decrypt(existing_event["content"])
+                        content = nip44_decrypt(
+                            existing_event["content"], wallet_obj._privkey
+                        )
                         import json
 
                         wallet_data = json.loads(content)
@@ -1587,8 +2046,8 @@ def status(
                             f"  P2PK Key: {'✅ Configured' if has_privkey else '❌ Not set'}"
                         )
 
-                        console.print(f"  Relays: {len(wallet_obj.relays)}")
-                        for i, relay in enumerate(wallet_obj.relays):
+                        console.print(f"  Relays: {len(wallet_obj.relay_urls)}")
+                        for i, relay in enumerate(wallet_obj.relay_urls):
                             console.print(f"    {i + 1}. {relay}")
 
                     except Exception as e:
@@ -1749,25 +2208,28 @@ def erase(
                 wallet_exists = False
                 history_count = 0
                 token_count = 0
-                current_balance = 0
 
                 if clean_wallet:
-                    exists, _ = await wallet_obj.check_wallet_event_exists()
+                    (
+                        exists,
+                        _,
+                    ) = await wallet_obj.event_manager.check_wallet_event_exists()
                     wallet_exists = exists
 
                 if clean_history:
-                    history_entries = await wallet_obj.fetch_spending_history()
+                    history_entries = (
+                        await wallet_obj.event_manager.fetch_spending_history()
+                    )
                     history_count = len(history_entries)
 
                 if clean_tokens:
-                    token_count = await wallet_obj.count_token_events()
+                    token_count = await wallet_obj.event_manager.count_token_events()
                     # Get current balance to show user what they're about to lose
                     try:
-                        current_balance = await wallet_obj.get_balance(
-                            check_proofs=False
-                        )
+                        state = await wallet_obj.fetch_wallet_state(check_proofs=False)
+                        current_balance_by_unit = state.balance_by_unit
                     except Exception:
-                        current_balance = 0
+                        current_balance_by_unit = {}
 
                 # Show what will be deleted
                 if not wallet_exists and history_count == 0 and token_count == 0:
@@ -1788,8 +2250,31 @@ def erase(
                     total_events += history_count
 
                 if clean_tokens and token_count > 0:
+                    # Format balance summary
+                    balance_parts = []
+                    for currency, balance in sorted(current_balance_by_unit.items()):
+                        if currency in [
+                            "usd",
+                            "eur",
+                            "gbp",
+                            "cad",
+                            "chf",
+                            "aud",
+                            "jpy",
+                            "cny",
+                            "inr",
+                            "usdt",
+                            "usdc",
+                            "dai",
+                        ]:
+                            display_balance = balance / 100
+                            balance_parts.append(f"{display_balance:.2f} {currency}")
+                        else:
+                            balance_parts.append(f"{balance} {currency}")
+                    balance_str = ", ".join(balance_parts) if balance_parts else "0"
+
                     erase_summary.append(
-                        f"💰 {token_count} token storage events [red](containing {current_balance} sats!)[/red]"
+                        f"💰 {token_count} token storage events [red](containing {balance_str}!)[/red]"
                     )
                     total_events += token_count
 
@@ -1810,7 +2295,7 @@ def erase(
 
                     if clean_tokens:
                         console.print(
-                            f"\n[red]💀 DANGER: You will lose {current_balance} sats stored on Nostr![/red]"
+                            f"\n[red]💀 DANGER: You will lose {balance_str} stored on Nostr![/red]"
                         )
                         console.print(
                             "[red]   This deletes your actual token storage, not just metadata![/red]"
@@ -1828,8 +2313,10 @@ def erase(
 
                     # Extra confirmation for dangerous operations
                     if clean_tokens:
-                        confirm_msg = f"\n[red]Type 'DELETE {current_balance} SATS' to confirm token deletion[/red]"
-                        expected_response = f"DELETE {current_balance} SATS"
+                        # For confirmation, use a simplified balance string
+                        confirm_balance_str = balance_str.upper().replace(",", " AND")
+                        confirm_msg = f"\n[red]Type 'DELETE {confirm_balance_str}' to confirm token deletion[/red]"
+                        expected_response = f"DELETE {confirm_balance_str}"
                         user_response = Prompt.ask(confirm_msg)
 
                         if user_response != expected_response:
@@ -1851,24 +2338,28 @@ def erase(
 
                 if clean_wallet and wallet_exists:
                     console.print("🗑️ Deleting wallet configuration events...")
-                    wallet_deleted = await wallet_obj.delete_all_wallet_events()
+                    wallet_deleted = (
+                        await wallet_obj.event_manager.delete_all_wallet_events()
+                    )
                     total_deleted += wallet_deleted
                     console.print(f"   ✅ Deleted {wallet_deleted} wallet event(s)")
 
                 if clean_history and history_count > 0:
                     console.print("🗑️ Deleting transaction history events...")
-                    history_deleted = await wallet_obj.clear_spending_history()
+                    history_deleted = (
+                        await wallet_obj.event_manager.clear_spending_history()
+                    )
                     total_deleted += history_deleted
                     console.print(f"   ✅ Deleted {history_deleted} history event(s)")
 
                 if clean_tokens and token_count > 0:
-                    console.print(
-                        f"🗑️ Deleting token storage events ({current_balance} sats)..."
+                    console.print(f"🗑️ Deleting token storage events ({balance_str})...")
+                    tokens_deleted = (
+                        await wallet_obj.event_manager.clear_all_token_events()
                     )
-                    tokens_deleted = await wallet_obj.clear_all_token_events()
                     total_deleted += tokens_deleted
                     console.print(
-                        f"   💀 Deleted {tokens_deleted} token event(s) containing {current_balance} sats"
+                        f"   💀 Deleted {tokens_deleted} token event(s) containing {balance_str}"
                     )
 
                 if clean_nsec and nsec_existed:
@@ -1888,7 +2379,9 @@ def erase(
                 )
 
                 if clean_tokens:
-                    console.print("\n[red]⚠️  Your Nostr balance is now 0 sats[/red]")
+                    console.print(
+                        "\n[red]⚠️  Your Nostr balance is now 0 in all currencies[/red]"
+                    )
                     console.print(
                         "   Any tokens you had are no longer accessible from Nostr relays"
                     )
@@ -1904,7 +2397,7 @@ def erase(
         except Exception as e:
             handle_wallet_error(e)
 
-    asyncio.run(_erase())
+        asyncio.run(_erase())
 
 
 @app.command()
@@ -1932,7 +2425,7 @@ def cleanup(
     superseded, making it work even on relays that don't support deletion events.
     """
 
-    async def _cleanup():
+    async def _cleanup() -> dict | None:
         try:
             nsec = get_nsec()
             # Use create_wallet_with_mint_selection for automatic mint discovery and selection
@@ -1941,11 +2434,32 @@ def cleanup(
             )
             async with wallet:
                 # Get current state for confirmation
-                current_balance = await wallet.get_balance(check_proofs=False)
-                token_count = await wallet.count_token_events()
+                state = await wallet.fetch_wallet_state(check_proofs=False)
+                token_count = await wallet.event_manager.count_token_events()
 
                 console.print("[cyan]🧹 Wallet Cleanup Tool[/cyan]")
-                console.print(f"Current balance: {current_balance} sats")
+                console.print("Current balance:")
+                for currency, balance in sorted(state.balance_by_unit.items()):
+                    if currency in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        display_balance = balance / 100
+                        console.print(
+                            f"  {currency.upper()}: {display_balance:.2f} {currency}"
+                        )
+                    else:
+                        console.print(f"  {currency.upper()}: {balance} {currency}")
                 console.print(f"Current token events: {token_count}")
 
                 if not dry_run and not confirm:
@@ -1965,10 +2479,166 @@ def cleanup(
 
                     if confirm_cleanup != "yes":
                         console.print("[yellow]❌ Cleanup cancelled[/yellow]")
-                        return
+                        return None
 
                 # Perform cleanup
-                stats = await wallet.cleanup_wallet_state(dry_run=dry_run)
+                print("🧹 Starting wallet state cleanup...")
+
+                # Get current state
+                state = await wallet.fetch_wallet_state(
+                    check_proofs=True, check_local_backups=False
+                )
+
+                # Fetch all events to analyze
+                all_events = await wallet.relay_manager.fetch_wallet_events(
+                    wallet.pubkey
+                )
+                token_events = [e for e in all_events if e["kind"] == EventKind.Token]
+
+                # Categorize events
+                valid_events = []
+                undecryptable_events = []
+                empty_events = []
+
+                for event in token_events:
+                    try:
+                        decrypted = nip44_decrypt(event["content"], wallet._privkey)
+                        token_data = json.loads(decrypted)
+                        proofs = token_data.get("proofs", [])
+
+                        if proofs:
+                            valid_events.append(event["id"])
+                        else:
+                            empty_events.append(event["id"])
+
+                    except Exception:
+                        undecryptable_events.append(event["id"])
+
+                stats: dict = {
+                    "total_events": len(token_events),
+                    "valid_events": len(valid_events),
+                    "undecryptable_events": len(undecryptable_events),
+                    "empty_events": len(empty_events),
+                    "valid_proofs": len(state.proofs),
+                    "balance_by_unit": state.balance_by_unit,
+                    "events_consolidated": 0,
+                    "events_marked_superseded": 0,
+                }
+
+                # Format balance string
+                balance_parts = []
+                for currency, balance in sorted(state.balance_by_unit.items()):
+                    if currency in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        display_balance = balance / 100
+                        balance_parts.append(f"{display_balance:.2f} {currency}")
+                    else:
+                        balance_parts.append(f"{balance} {currency}")
+                total_balance_str = ", ".join(balance_parts) if balance_parts else "0"
+
+                print(f"📊 Analysis: {stats['total_events']} total events")
+                print(f"   ✅ Valid: {stats['valid_events']}")
+                print(f"   ❌ Undecryptable: {stats['undecryptable_events']}")
+                print(f"   📭 Empty: {stats['empty_events']}")
+                print(
+                    f"   💰 Valid proofs: {stats['valid_proofs']} ({total_balance_str})"
+                )
+
+                if dry_run:
+                    print("🔍 Dry run - no changes will be made")
+                    return stats
+
+                # Only consolidate if we have significant cleanup opportunity
+                cleanup_threshold = max(
+                    5, len(token_events) // 3
+                )  # At least 5 events or 1/3 of total
+                events_to_cleanup = undecryptable_events + empty_events
+
+                if len(events_to_cleanup) < cleanup_threshold:
+                    print(
+                        f"🎯 No significant cleanup needed (threshold: {cleanup_threshold})"
+                    )
+                    return stats
+
+                if not state.proofs:
+                    print("⚠️  No valid proofs found - skipping consolidation")
+                    return stats
+
+                print(
+                    f"🔄 Consolidating {len(state.proofs)} proofs into fresh events..."
+                )
+
+                # Create fresh consolidated events
+                new_event_ids = []
+                # Group proofs by mint
+                proofs_by_mint: dict[str, list] = {}
+                for proof in state.proofs:
+                    mint_url = proof.get("mint", "unknown")
+                    if mint_url not in proofs_by_mint:
+                        proofs_by_mint[mint_url] = []
+                    proofs_by_mint[mint_url].append(proof)
+
+                for mint_url, mint_proofs in proofs_by_mint.items():
+                    try:
+                        new_id = await wallet.event_manager.publish_token_event(
+                            mint_proofs,
+                            deleted_token_ids=events_to_cleanup,  # Mark all old events as superseded
+                        )
+                        new_event_ids.append(new_id)
+                        stats["events_consolidated"] += 1
+                        print(
+                            f"   ✅ Created consolidated event for {mint_url}: {len(mint_proofs)} proofs"
+                        )
+                    except Exception as e:
+                        print(f"   ❌ Failed to consolidate {mint_url}: {e}")
+
+                if new_event_ids:
+                    stats["events_marked_superseded"] = len(events_to_cleanup)
+
+                    # Try to delete old events (best effort)
+                    deleted_count = 0
+                    for event_id in events_to_cleanup:
+                        try:
+                            await wallet.event_manager.delete_token_event(event_id)
+                            deleted_count += 1
+                        except Exception:
+                            # Deletion not supported - that's okay, 'del' field handles it
+                            pass
+
+                    if deleted_count > 0:
+                        print(f"   🗑️  Successfully deleted {deleted_count} old events")
+                    else:
+                        print("   📝 Old events marked as superseded via 'del' field")
+
+                    # Create consolidation history
+                    try:
+                        # For consolidation, we use "sat" as default unit since it's a net-zero operation
+                        await wallet.event_manager.publish_spending_history(
+                            direction="in",  # Consolidation is like receiving all proofs again
+                            amount=0,  # No net change in balance
+                            unit="sat",  # Default unit for consolidation
+                            created_token_ids=new_event_ids,
+                            destroyed_token_ids=events_to_cleanup,
+                        )
+                        print("   📋 Created consolidation history")
+                    except Exception as e:
+                        print(f"   ⚠️  Could not create history: {e}")
+
+                print(
+                    f"🎉 Cleanup complete! Consolidated {stats['events_consolidated']} events"
+                )
 
                 # Show results
                 console.print("\n[green]📋 Cleanup Results:[/green]")
@@ -1979,7 +2649,33 @@ def cleanup(
                 )
                 console.print(f"   Empty events: {stats['empty_events']}")
                 console.print(f"   Valid proofs: {stats['valid_proofs']}")
-                console.print(f"   Balance: {stats['balance']} sats")
+
+                # Show balance by currency
+                console.print("   Balance by currency:")
+                balance_by_unit = cast(dict[str, int], stats["balance_by_unit"])
+                for currency_str, balance in sorted(balance_by_unit.items()):
+                    if currency_str in [
+                        "usd",
+                        "eur",
+                        "gbp",
+                        "cad",
+                        "chf",
+                        "aud",
+                        "jpy",
+                        "cny",
+                        "inr",
+                        "usdt",
+                        "usdc",
+                        "dai",
+                    ]:
+                        display_balance = balance / 100
+                        console.print(
+                            f"     {currency_str.upper()}: {display_balance:.2f} {currency_str}"
+                        )
+                    else:
+                        console.print(
+                            f"     {currency_str.upper()}: {balance} {currency_str}"
+                        )
 
                 if not dry_run:
                     console.print(
@@ -2004,13 +2700,18 @@ def cleanup(
                     console.print(
                         "\n[cyan]ℹ️  This was a dry run - no changes were made.[/cyan]"
                     )
-                    if stats["undecryptable_events"] + stats["empty_events"] >= 5:
+                    if (
+                        cast(int, stats["undecryptable_events"])
+                        + cast(int, stats["empty_events"])
+                        >= 5
+                    ):
                         console.print(
                             "[yellow]Run without --dry-run to perform actual cleanup.[/yellow]"
                         )
 
         except Exception as e:
             handle_wallet_error(e)
+        return None
 
     asyncio.run(_cleanup())
 
@@ -2042,7 +2743,7 @@ def backup(
     Use --scan to check for missing proofs and --recover to restore them.
     """
 
-    async def _backup():
+    async def _backup() -> None:
         nsec = get_nsec()
         async with await create_wallet_with_mint_selection(
             nsec, mint_urls=mint_urls
@@ -2085,7 +2786,7 @@ def backup(
 
                         with open(bf, "r") as f:
                             data = json.load(f)
-                        proof_count = len(data.get("proofs", []))
+                        proof_count: int | str = len(data.get("proofs", []))
                     except Exception:
                         proof_count = "?"
 
@@ -2160,10 +2861,31 @@ def backup(
                         console.print("\n[green]✅ Recovery successful![/green]")
 
                         # Check new balance
-                        balance = await wallet.get_balance()
-                        console.print(
-                            f"\n💰 Current balance: [green]{balance} sats[/green]"
-                        )
+                        state = await wallet.fetch_wallet_state(check_proofs=False)
+                        console.print("\n💰 Current balance:")
+                        for currency, balance in sorted(state.balance_by_unit.items()):
+                            if currency in [
+                                "usd",
+                                "eur",
+                                "gbp",
+                                "cad",
+                                "chf",
+                                "aud",
+                                "jpy",
+                                "cny",
+                                "inr",
+                                "usdt",
+                                "usdc",
+                                "dai",
+                            ]:
+                                display_balance = balance / 100
+                                console.print(
+                                    f"   {currency.upper()}: [green]{display_balance:.2f} {currency}[/green]"
+                                )
+                            else:
+                                console.print(
+                                    f"   {currency.upper()}: [green]{balance} {currency}[/green]"
+                                )
                     else:
                         console.print("\n[red]❌ No proofs were recovered[/red]")
 
@@ -2282,8 +3004,8 @@ def history(
             async with wallet:
                 console.print("🔄 Fetching spending history...")
 
-                # Fetch history
-                history_entries = await wallet.fetch_spending_history()
+                # Fetch history from event manager
+                history_entries = await wallet.event_manager.fetch_spending_history()
 
                 if not history_entries:
                     console.print("[yellow]ℹ️ No spending history found[/yellow]")
@@ -2321,7 +3043,8 @@ def history(
                     direction_display = f"{direction_emoji} {direction}"
 
                     amount = entry.get("amount", "0")
-                    amount_display = f"{amount} sats"
+                    unit = entry.get("unit", "sat")
+                    amount_display = f"{amount} {unit}"
 
                     event_id = entry.get("event_id", "unknown")
                     event_short = (
@@ -2412,16 +3135,30 @@ def debug(
         """Debug wallet configuration and keys."""
         console.print("\n[yellow]🗂️  Wallet Configuration[/yellow]")
         console.print(f"  Nostr Public Key: {wallet_obj._get_pubkey()}")
-        console.print(
-            f"  Wallet Private Key: {wallet_obj.wallet_privkey[:8]}...{wallet_obj.wallet_privkey[-8:]}"
-        )
-        console.print(f"  Currency: {wallet_obj.currency}")
+        if wallet_obj.wallet_privkey:
+            console.print(
+                f"  Wallet Private Key: {wallet_obj.wallet_privkey[:8]}...{wallet_obj.wallet_privkey[-8:]}"
+            )
+        else:
+            console.print(
+                "  Wallet Private Key: [yellow]Not loaded (no wallet event)[/yellow]"
+            )
         console.print(f"  Configured Mints: {len(wallet_obj.mint_urls)}")
         for i, mint_url in enumerate(wallet_obj.mint_urls):
             console.print(f"    {i + 1}. {mint_url}")
 
         # Check wallet events
-        exists, current_event = await wallet_obj.check_wallet_event_exists()
+        # Note: check_wallet_event_exists is no longer available in refactored wallet
+        # We'll fetch events directly instead
+        pubkey = wallet_obj._get_pubkey()
+        all_events = await wallet_obj.relay_manager.fetch_wallet_events(pubkey)
+        wallet_events = [e for e in all_events if e["kind"] == EventKind.Wallet]
+
+        exists = len(wallet_events) > 0
+        current_event = (
+            max(wallet_events, key=lambda e: e["created_at"]) if wallet_events else None
+        )
+
         if exists and current_event:
             from datetime import datetime
 
@@ -2465,8 +3202,8 @@ def debug(
     async def _debug_nostr_relays(wallet_obj: Wallet) -> None:
         """Debug Nostr relay connectivity and events."""
         console.print("\n[yellow]🌐 Nostr Relay Status[/yellow]")
-        console.print(f"  Configured Relays: {len(wallet_obj.relays)}")
-        for i, relay in enumerate(wallet_obj.relays):
+        console.print(f"  Configured Relays: {len(wallet_obj.relay_urls)}")
+        for i, relay in enumerate(wallet_obj.relay_urls):
             console.print(f"    {i + 1}. {relay}")
 
         # Check relay connectivity
@@ -2527,59 +3264,171 @@ def debug(
             except Exception as e:
                 console.print(f"    {relay_conn.url}: ❌ Error: {e}")
 
-    async def _debug_balance_proofs(wallet_obj):
+    async def _debug_balance_proofs(wallet_obj: Wallet) -> None:
         """Debug balance calculation and proof validation."""
         console.print("\n[yellow]💰 Balance & Proof Validation[/yellow]")
 
         try:
             # Get balance without validation first (faster)
             state_unvalidated = await wallet_obj.fetch_wallet_state(check_proofs=False)
-            console.print(
-                f"  Raw Balance (unvalidated): {state_unvalidated.balance} sats"
-            )
             console.print(f"  Raw Proof Count: {len(state_unvalidated.proofs)}")
 
+            # Show raw balance by currency
+            console.print("  Raw Balance by Currency (unvalidated):")
+            for currency, balance in sorted(state_unvalidated.balance_by_unit.items()):
+                if currency in [
+                    "usd",
+                    "eur",
+                    "gbp",
+                    "cad",
+                    "chf",
+                    "aud",
+                    "jpy",
+                    "cny",
+                    "inr",
+                    "usdt",
+                    "usdc",
+                    "dai",
+                ]:
+                    display_balance = balance / 100
+                    console.print(
+                        f"    {currency.upper()}: {display_balance:.2f} {currency}"
+                    )
+                else:
+                    console.print(f"    {currency.upper()}: {balance} {currency}")
+
             # Get balance with validation (slower but accurate)
-            console.print("  Validating proofs with mints...")
+            console.print("\n  Validating proofs with mints...")
             state_validated = await wallet_obj.fetch_wallet_state(check_proofs=True)
-            console.print(f"  Validated Balance: {state_validated.balance} sats")
             console.print(f"  Valid Proof Count: {len(state_validated.proofs)}")
 
+            # Show validated balance by currency
+            console.print("  Validated Balance by Currency:")
+            for currency, balance in sorted(state_validated.balance_by_unit.items()):
+                if currency in [
+                    "usd",
+                    "eur",
+                    "gbp",
+                    "cad",
+                    "chf",
+                    "aud",
+                    "jpy",
+                    "cny",
+                    "inr",
+                    "usdt",
+                    "usdc",
+                    "dai",
+                ]:
+                    display_balance = balance / 100
+                    console.print(
+                        f"    {currency.upper()}: {display_balance:.2f} {currency}"
+                    )
+                else:
+                    console.print(f"    {currency.upper()}: {balance} {currency}")
+
             # Show difference if any
-            balance_diff = state_unvalidated.balance - state_validated.balance
             proof_diff = len(state_unvalidated.proofs) - len(state_validated.proofs)
 
-            if balance_diff > 0 or proof_diff > 0:
-                console.print("  [red]⚠️  Found spent/invalid proofs:[/red]")
-                console.print(f"    Lost Balance: {balance_diff} sats")
+            if proof_diff > 0:
+                console.print("\n  [red]⚠️  Found spent/invalid proofs:[/red]")
                 console.print(f"    Invalid Proofs: {proof_diff}")
-            else:
-                console.print("  [green]✅ All proofs valid[/green]")
 
-            # Show proof breakdown by mint
+                # Calculate balance differences by currency
+                console.print("    Lost Balance by Currency:")
+                all_currencies = set(state_unvalidated.balance_by_unit.keys())
+                for currency in sorted(all_currencies):
+                    unval_balance = state_unvalidated.balance_by_unit.get(currency, 0)
+                    val_balance = state_validated.balance_by_unit.get(currency, 0)
+                    diff = unval_balance - val_balance
+
+                    if diff > 0:
+                        if currency in [
+                            "usd",
+                            "eur",
+                            "gbp",
+                            "cad",
+                            "chf",
+                            "aud",
+                            "jpy",
+                            "cny",
+                            "inr",
+                            "usdt",
+                            "usdc",
+                            "dai",
+                        ]:
+                            display_diff = diff / 100
+                            console.print(
+                                f"      {currency.upper()}: {display_diff:.2f} {currency}"
+                            )
+                        else:
+                            console.print(
+                                f"      {currency.upper()}: {diff} {currency}"
+                            )
+            else:
+                console.print("\n  [green]✅ All proofs valid[/green]")
+
+            # Show proof breakdown by mint and currency
             if state_validated.proofs:
-                console.print("\n  Proof Breakdown by Mint:")
-                proofs_by_mint = {}
+                console.print("\n  Proof Breakdown by Mint and Currency:")
+
+                # Group proofs by mint and currency
+                proofs_by_mint_currency: dict[str, dict[CurrencyUnit, list]] = {}
                 for proof in state_validated.proofs:
                     mint_url = proof.get("mint", "unknown")
-                    if mint_url not in proofs_by_mint:
-                        proofs_by_mint[mint_url] = []
-                    proofs_by_mint[mint_url].append(proof)
+                    currency = proof.get("unit", "sat")
 
-                for mint_url, mint_proofs in proofs_by_mint.items():
-                    mint_balance = sum(p["amount"] for p in mint_proofs)
-                    denominations = {}
-                    for proof in mint_proofs:
-                        amount = proof["amount"]
-                        denominations[amount] = denominations.get(amount, 0) + 1
+                    if mint_url not in proofs_by_mint_currency:
+                        proofs_by_mint_currency[mint_url] = {}
+                    if currency not in proofs_by_mint_currency[mint_url]:
+                        proofs_by_mint_currency[mint_url][currency] = []
+                    proofs_by_mint_currency[mint_url][currency].append(proof)
 
-                    denom_str = ", ".join(
-                        f"{amount}×{count}"
-                        for amount, count in sorted(denominations.items())
+                for mint_url, currency_proofs in proofs_by_mint_currency.items():
+                    # Show mint URL (truncated if too long)
+                    mint_display = (
+                        mint_url[:50] + "..." if len(mint_url) > 53 else mint_url
                     )
-                    console.print(
-                        f"    {mint_url}: {mint_balance} sats ({len(mint_proofs)} proofs: {denom_str})"
-                    )
+                    console.print(f"    {mint_display}:")
+
+                    for currency, proofs in sorted(currency_proofs.items()):  # type: ignore
+                        balance = sum(p["amount"] for p in proofs)
+
+                        # Group by denomination
+                        denominations: dict[int, int] = {}
+                        for proof in proofs:
+                            amount = proof["amount"]
+                            denominations[amount] = denominations.get(amount, 0) + 1
+
+                        denom_str = ", ".join(
+                            f"{amount}×{count}"
+                            for amount, count in sorted(denominations.items())
+                        )
+
+                        # Format display based on currency type
+                        if currency in [
+                            "usd",
+                            "eur",
+                            "gbp",
+                            "cad",
+                            "chf",
+                            "aud",
+                            "jpy",
+                            "cny",
+                            "inr",
+                            "usdt",
+                            "usdc",
+                            "dai",
+                        ]:
+                            # For fiat/stablecoins, show as dollars/euros with 2 decimal places
+                            display_balance = balance / 100
+                            console.print(
+                                f"      {currency.upper()}: {display_balance:.2f} {currency} ({len(proofs)} proofs: {denom_str})"
+                            )
+                        else:
+                            # For crypto currencies, show as is
+                            console.print(
+                                f"      {currency.upper()}: {balance} {currency} ({len(proofs)} proofs: {denom_str})"
+                            )
 
         except Exception as e:
             console.print(f"  ❌ Balance validation error: {e}")
@@ -2611,14 +3460,33 @@ def debug(
             for i, proof in enumerate(sample_proofs):
                 proof_id = f"{proof['secret']}:{proof['C']}"
                 mint_url = proof.get("mint", "unknown")
+                currency = proof.get("unit", "sat")
 
                 # Check cache status
                 is_cached, cached_state = wallet_obj._is_proof_state_cached(proof_id)
                 cache_status = f"cached ({cached_state})" if is_cached else "not cached"
 
-                console.print(
-                    f"    {i + 1}. {proof['amount']} sats from {mint_url[:30]}..."
-                )
+                # Format amount display based on currency
+                if currency in [
+                    "usd",
+                    "eur",
+                    "gbp",
+                    "cad",
+                    "chf",
+                    "aud",
+                    "jpy",
+                    "cny",
+                    "inr",
+                    "usdt",
+                    "usdc",
+                    "dai",
+                ]:
+                    display_amount = proof["amount"] / 100
+                    amount_str = f"{display_amount:.2f} {currency}"
+                else:
+                    amount_str = f"{proof['amount']} {currency}"
+
+                console.print(f"    {i + 1}. {amount_str} from {mint_url[:30]}...")
                 console.print(f"       ID: {proof['id'][:16]}...")
                 console.print(f"       Secret: {proof['secret'][:16]}...")
                 console.print(f"       Cache: {cache_status}")
@@ -2656,7 +3524,7 @@ def debug(
 
             for event in wallet_events:
                 try:
-                    decrypted = wallet_obj._nip44_decrypt(event["content"])
+                    decrypted = nip44_decrypt(event["content"], wallet_obj._privkey)
                     wallet_data = json.loads(decrypted)
 
                     for item in wallet_data:
@@ -2667,9 +3535,12 @@ def debug(
                     continue
 
             console.print(f"  Unique Private Keys Found: {len(wallet_keys)}")
-            console.print(
-                f"  Current Key: {wallet_obj.wallet_privkey[:8]}...{wallet_obj.wallet_privkey[-8:]}"
-            )
+            if wallet_obj.wallet_privkey:
+                console.print(
+                    f"  Current Key: {wallet_obj.wallet_privkey[:8]}...{wallet_obj.wallet_privkey[-8:]}"
+                )
+            else:
+                console.print("  Current Key: [yellow]Not loaded[/yellow]")
 
             # Test history decryption
             history_events = [e for e in all_events if e["kind"] == 7376]
@@ -2683,7 +3554,7 @@ def debug(
                 success_count = 0
                 for i, event in enumerate(history_events[:sample_size]):
                     try:
-                        decrypted = wallet_obj._nip44_decrypt(event["content"])
+                        decrypted = nip44_decrypt(event["content"], wallet_obj._privkey)
                         history_data = json.loads(decrypted)
                         direction = next(
                             (
@@ -2697,8 +3568,12 @@ def debug(
                             (item[1] for item in history_data if item[0] == "amount"),
                             "unknown",
                         )
+                        unit = next(
+                            (item[1] for item in history_data if item[0] == "unit"),
+                            "sat",
+                        )
                         console.print(
-                            f"    {i + 1}. ✅ Success: {direction} {amount} sats"
+                            f"    {i + 1}. ✅ Success: {direction} {amount} {unit}"
                         )
                         success_count += 1
                     except Exception as e:
@@ -2723,6 +3598,57 @@ def debug(
 def cli() -> None:
     """Entry point for the CLI."""
     app()
+
+
+@app.command()
+def swap(
+    amount: Annotated[int, typer.Argument(help="Amount to swap")],
+    from_unit: Annotated[
+        str, typer.Argument(help="Source currency (sat, usd, eur, etc.)")
+    ],
+    to_unit: Annotated[
+        str, typer.Argument(help="Target currency (sat, usd, eur, etc.)")
+    ],
+    mint_urls: Annotated[
+        Optional[list[str]], typer.Option("--mint", "-m", help="Mint URLs")
+    ] = None,
+    same_mint: Annotated[
+        bool,
+        typer.Option(
+            "--same-mint",
+            help="Require swap within same mint (default: prefer same mint)",
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")
+    ] = False,
+) -> None:
+    """Exchange tokens between different currencies/keysets.
+
+    This command allows you to swap tokens from one currency to another,
+    either within the same mint (if it supports both currencies) or
+    between different mints.
+
+    Examples:
+        Swap 100 USD to EUR: nuts swap 100 usd eur
+        Swap 1000 sats to USD: nuts swap 1000 sat usd
+        Force same mint: nuts swap 50 eur sat --same-mint
+    """
+
+    async def _swap():
+        console.print(
+            "[yellow]⚠️  The swap command is temporarily unavailable after the keyset refactor.[/yellow]"
+        )
+        console.print(
+            "[dim]Currency swaps will be re-implemented in a future update.[/dim]"
+        )
+        return
+
+    try:
+        asyncio.run(_swap())
+    except Exception as e:
+        handle_wallet_error(e)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

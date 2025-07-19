@@ -9,7 +9,6 @@ from sixty_nuts.mint import (
     MintError,
     InvalidKeysetError,
     BlindedMessage,
-    Proof,
     CurrencyUnit,
 )
 
@@ -36,13 +35,10 @@ class TestMint:
         """Test mint initialization."""
         mint = Mint("https://testnut.cashu.space")
         assert mint.url == "https://testnut.cashu.space"
-        assert mint._owns_client is True
         await mint.aclose()
 
-        # Test with custom client
         client = httpx.AsyncClient()
-        mint = Mint("https://testnut.cashu.space", client=client)
-        assert mint._owns_client is False
+        mint = Mint("https://testnut.cashu.space")
         await client.aclose()
 
     async def test_get_info(self, mint, mock_client) -> None:
@@ -87,28 +83,27 @@ class TestMint:
         mock_client.request.return_value = mock_response
         mint.client = mock_client
 
-        # Test without keyset_id
-        keys = await mint.get_keys()
-        assert len(keys["keysets"]) == 1
-        assert keys["keysets"][0]["id"] == "00ad268c4d1f5826"
-        assert keys["keysets"][0]["unit"] == "sat"
-        assert "keys" in keys["keysets"][0]
+        keysets = await mint.get_active_keysets()
+        assert len(keysets) == 1
+        assert keysets[0]["id"] == "00ad268c4d1f5826"
+        assert keysets[0]["unit"] == "sat"
+        assert "keys" in keysets[0]
 
-        # Test with keyset_id
-        keys = await mint.get_keys("00ad268c4d1f5826")
+        keyset = await mint.get_keyset("00ad268c4d1f5826")
         mock_client.request.assert_called_with(
             "GET",
             "https://testnut.cashu.space/v1/keys/00ad268c4d1f5826",
             json=None,
             params=None,
         )
+        assert keyset["id"] == "00ad268c4d1f5826"
+        assert keyset["unit"] == "sat"
 
     async def test_get_keys_invalid_response(self, mint, mock_client) -> None:
         """Test get_keys with invalid response structure."""
         mock_response = Mock()
         mock_response.status_code = 200
 
-        # Test missing keysets field
         mock_response.json.return_value = {"invalid": "response"}
         mock_client.request.return_value = mock_response
         mint.client = mock_client
@@ -116,7 +111,7 @@ class TestMint:
         with pytest.raises(
             InvalidKeysetError, match="Response missing 'keysets' field"
         ):
-            await mint.get_keys()
+            await mint.get_active_keysets()
 
     async def test_get_keys_invalid_keyset_structure(self, mint, mock_client) -> None:
         """Test get_keys with invalid keyset structure."""
@@ -126,7 +121,6 @@ class TestMint:
             "keysets": [
                 {
                     "id": "00ad268c4d1f5826",
-                    # Missing unit and keys fields
                 }
             ]
         }
@@ -135,7 +129,7 @@ class TestMint:
         mint.client = mock_client
 
         with pytest.raises(InvalidKeysetError, match="Invalid keyset at index 0"):
-            await mint.get_keys()
+            await mint.get_active_keysets()
 
     async def test_validate_compressed_pubkey(self, mint) -> None:
         """Test compressed public key validation."""
@@ -263,7 +257,9 @@ class TestMint:
         mock_client.request.return_value = mock_response
         mint.client = mock_client
 
-        inputs = [Proof(id="00ad268c4d1f5826", amount=3, secret="secret", C="02old...")]
+        inputs = [
+            {"id": "00ad268c4d1f5826", "amount": 3, "secret": "secret", "C": "02old..."}
+        ]
         outputs = [
             BlindedMessage(amount=1, id="00ad268c4d1f5826", B_="blind1"),
             BlindedMessage(amount=2, id="00ad268c4d1f5826", B_="blind2"),
@@ -361,20 +357,17 @@ class TestNUT01Compliance:
         mock_client.request.return_value = mock_response
         mint.client = mock_client
 
-        keys_response = await mint.get_keys()
+        keysets = await mint.get_active_keysets()
 
-        # Verify structure matches NUT-01
-        assert "keysets" in keys_response
-        assert isinstance(keys_response["keysets"], list)
-        assert len(keys_response["keysets"]) > 0
+        assert isinstance(keysets, list)
+        assert len(keysets) > 0
 
-        keyset = keys_response["keysets"][0]
+        keyset = keysets[0]
         assert "id" in keyset
         assert "unit" in keyset
         assert "keys" in keyset
         assert isinstance(keyset["keys"], dict)
 
-        # Verify all pubkeys are compressed secp256k1
         for amount, pubkey in keyset["keys"].items():
             assert mint._is_valid_compressed_pubkey(pubkey)
 

@@ -9,18 +9,9 @@ import base64
 
 from coincurve import PrivateKey
 
-from .types import ProofDict, WalletError
-from .relay import (
-    NostrEvent,
-    RelayManager,
-    EventKind,
-    create_event,
-)
-from .crypto import (
-    get_pubkey,
-    nip44_encrypt,
-    nip44_decrypt,
-)
+from .types import Proof, WalletError
+from .relay import NostrEvent, RelayClient, EventKind, create_event
+from .crypto import get_pubkey, nip44_encrypt, nip44_decrypt
 
 
 class EventManager:
@@ -28,7 +19,7 @@ class EventManager:
 
     def __init__(
         self,
-        relay_manager: RelayManager,
+        relay_manager: RelayClient,
         privkey: PrivateKey,
         mint_urls: list[str],
     ) -> None:
@@ -38,7 +29,7 @@ class EventManager:
 
     # ───────────────────────── NIP-60 Conversion Helpers ─────────────────────────
 
-    def _convert_proof_to_nip60(self, proof: ProofDict) -> ProofDict:
+    def _convert_proof_to_nip60(self, proof: Proof) -> Proof:
         """Convert a proof from internal format (hex secret) to NIP-60 format (base64 secret).
 
         Args:
@@ -63,7 +54,7 @@ class EventManager:
 
         return nip60_proof
 
-    def _convert_proof_from_nip60(self, proof: ProofDict) -> ProofDict:
+    def _convert_proof_from_nip60(self, proof: Proof) -> Proof:
         """Convert a proof from NIP-60 format (base64 secret) to internal format (hex secret).
 
         Args:
@@ -154,7 +145,10 @@ class EventManager:
         content_data = [
             ["privkey", wallet_privkey],
         ]
-        for mint_url in self.mint_urls:
+        # Normalize and deduplicate mint URLs before storing
+        normalized_mint_urls = [url.rstrip("/") for url in self.mint_urls]
+        unique_mint_urls = list(dict.fromkeys(normalized_mint_urls))  # Preserves order
+        for mint_url in unique_mint_urls:
             content_data.append(["mint", mint_url])
 
         # Encrypt content
@@ -163,7 +157,7 @@ class EventManager:
 
         # NIP-60 requires at least one mint tag in the tags array (unencrypted)
         # This is critical for wallet discovery!
-        tags = [["mint", url] for url in self.mint_urls]
+        tags = [["mint", url] for url in unique_mint_urls]
 
         # Create replaceable wallet event
         event = create_event(
@@ -287,7 +281,7 @@ class EventManager:
                         key = item[0]
                         value = item[1]
 
-                        if key in ["direction", "amount"]:
+                        if key in ["direction", "amount", "unit"]:
                             history_entry[key] = value
                         elif key == "e":  # Event references
                             ref_type = item[3] if len(item) > 3 else "unknown"
@@ -332,6 +326,7 @@ class EventManager:
         *,
         direction: Literal["in", "out"],
         amount: int,
+        unit: str = "sat",
         created_token_ids: list[str] | None = None,
         destroyed_token_ids: list[str] | None = None,
         redeemed_event_id: str | None = None,
@@ -341,6 +336,7 @@ class EventManager:
         content_data = [
             ["direction", direction],
             ["amount", str(amount)],
+            ["unit", unit],
         ]
 
         # Add e-tags for created tokens (encrypted)
@@ -369,7 +365,6 @@ class EventManager:
             tags=tags,
         )
 
-        # TODO: make this async in background
         return await self.relay_manager.publish_to_relays(event)
 
     async def clear_spending_history(self) -> int:
@@ -422,7 +417,7 @@ class EventManager:
 
     async def _split_large_token_events(
         self,
-        proofs: list[ProofDict],
+        proofs: list[Proof],
         mint_url: str,
         deleted_token_ids: list[str] | None = None,
     ) -> list[str]:
@@ -436,7 +431,7 @@ class EventManager:
         # Maximum event size (leaving buffer for encryption overhead)
         max_size = 60000  # 60KB limit with buffer
         event_ids: list[str] = []
-        current_batch: list[ProofDict] = []
+        current_batch: list[Proof] = []
 
         for proof in proofs:
             # Test adding this proof to current batch
@@ -528,7 +523,7 @@ class EventManager:
 
     async def publish_token_event(
         self,
-        proofs: list[ProofDict],
+        proofs: list[Proof],
         *,
         deleted_token_ids: list[str] | None = None,
     ) -> str:

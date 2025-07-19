@@ -16,9 +16,7 @@ class TempWallet(Wallet):
         self,
         *,
         mint_urls: list[str] | None = None,
-        currency: CurrencyUnit = "sat",
-        wallet_privkey: str | None = None,
-        relays: list[str] | None = None,
+        relay_urls: list[str] | None = None,
     ) -> None:
         """Initialize temporary wallet with a new random private key.
 
@@ -36,9 +34,7 @@ class TempWallet(Wallet):
         super().__init__(
             nsec=temp_nsec,
             mint_urls=mint_urls,
-            currency=currency,
-            wallet_privkey=wallet_privkey,
-            relays=relays,
+            relay_urls=relay_urls,
         )
 
     def _encode_nsec(self, privkey: PrivateKey) -> str:
@@ -87,12 +83,7 @@ class TempWallet(Wallet):
         Returns:
             Temporary wallet instance (call initialize_wallet() to create events if needed)
         """
-        wallet = cls(
-            mint_urls=mint_urls,
-            currency=currency,
-            wallet_privkey=wallet_privkey,
-            relays=relays,
-        )
+        wallet = cls(mint_urls=mint_urls, relay_urls=relays)
 
         if auto_init:
             try:
