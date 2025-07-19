@@ -63,7 +63,9 @@ class Wallet:
         self._privkey = decode_nsec(nsec)
         self.pubkey = get_pubkey(self._privkey)
 
-        self.mint_urls: list[str] = mint_urls or get_mints_from_env()
+        # Normalize mint URLs to ensure consistent comparison
+        raw_mint_urls = mint_urls or get_mints_from_env()
+        self.mint_urls: list[str] = [normalize_mint_url(url) for url in raw_mint_urls]
         self.relay_urls: list[str] = relay_urls or get_relays_from_env()
         self.mints: dict[str, Mint] = {}
 
@@ -170,15 +172,21 @@ class Wallet:
         """
         # Parse token
         mint_url, unit, proofs = self._parse_cashu_token(token)
+        print("DEBUG", mint_url, unit)
+
+        # Normalize mint URL for comparison
+        mint_url = normalize_mint_url(mint_url)
 
         # Check if this is a trusted mint
         if auto_swap and self.mint_urls and mint_url not in self.mint_urls:
             # Token is from untrusted mint - swap to our primary mint
+            print("DEBUG SWAP", self._primary_mint_url())
             return await self.remote_redeem_proofs(proofs, self._primary_mint_url())
 
         # Proceed with normal redemption for trusted mints
         # Calculate total amount
         total_amount = sum(p["amount"] for p in proofs)
+        print("DEBUG TOTAL AMOUNT", total_amount)
 
         # Get mint instance to calculate fees
         mint = self._get_mint(mint_url)
@@ -259,7 +267,6 @@ class Wallet:
                     # Convert dict proofs to Proof
                     proof_dicts: list[Proof] = []
                     for proof in new_proofs:
-                        print("DEBUG PROOFS", proof, proof["unit"], mint.url)
                         proof_dicts.append(
                             Proof(
                                 id=proof["id"],
@@ -328,17 +335,55 @@ class Wallet:
 
         state = await self.fetch_wallet_state(check_proofs=True)
         total_needed = int(invoice_amount_sat * 1.01)
-        total_balance = await state.total_balance_sat()
+        total_balance = await state.total_balance_sat(include_shitnuts=True)
         self.raise_if_insufficient_balance(total_balance, total_needed)
 
         if target_mint is None:
-            mint_balances = state.mint_balances
-            target_mint = max(mint_balances, key=lambda k: mint_balances[k])
-            if mint_balances[target_mint] < total_needed:
-                await self.transfer_balance_to_mint(
-                    total_needed, from_mint=None, to_mint=target_mint
+            # Only consider trusted mints
+            mint_balances = {}
+            for mint_url, balance in state.mint_balances.items():
+                if self.mint_urls and mint_url in self.mint_urls:
+                    mint_balances[mint_url] = balance
+
+            if not mint_balances:
+                raise WalletError(
+                    "No trusted mints found with balance. "
+                    "Specify a mint explicitly with target_mint parameter."
                 )
-                return await self.melt(invoice, target_mint=target_mint)
+
+            # Sort mints by balance and try each until one works
+            sorted_mints = sorted(
+                mint_balances.items(), key=lambda x: x[1], reverse=True
+            )
+
+            for candidate_mint, balance in sorted_mints:
+                if balance < total_needed:
+                    # This mint doesn't have enough balance, try transferring
+                    try:
+                        await self.transfer_balance_to_mint(
+                            total_needed, from_mint=None, to_mint=candidate_mint
+                        )
+                        return await self.melt(invoice, target_mint=candidate_mint)
+                    except Exception as e:
+                        print(f"⚠️  Failed to transfer balance to {candidate_mint}: {e}")
+                        continue
+
+                # Try to use this mint
+                try:
+                    # Quick connectivity check
+                    test_mint = self._get_mint(candidate_mint)
+                    await asyncio.wait_for(test_mint.get_info(), timeout=5.0)
+                    target_mint = candidate_mint
+                    break
+                except Exception as e:
+                    print(f"⚠️  Mint {candidate_mint} is not reachable: {e}")
+                    continue
+
+            if target_mint is None:
+                raise WalletError(
+                    "No reachable trusted mint found with sufficient balance. "
+                    f"Tried mints: {', '.join(m for m, _ in sorted_mints)}"
+                )
 
         # Create melt quote to get fees
         mint = self._get_mint(target_mint)
@@ -435,13 +480,50 @@ class Wallet:
 
         # If no mint URL specified, find a mint with sufficient balance of the requested unit
         if mint_url is None:
-            mint_url = await self._select_mint_for_amount(amount, unit, state.proofs)
+            try:
+                mint_url = await self._select_mint_for_amount(
+                    amount, unit, state.proofs, trusted_only=True
+                )
+            except WalletError as e:
+                # Check if we have balance in untrusted mints
+                unit_proofs = [p for p in state.proofs if p.get("unit") == unit]
+                untrusted_balances: dict[str, int] = {}
+
+                for proof in unit_proofs:
+                    proof_mint = proof.get("mint", "")
+                    if (
+                        proof_mint
+                        and self.mint_urls
+                        and proof_mint not in self.mint_urls
+                    ):
+                        untrusted_balances[proof_mint] = (
+                            untrusted_balances.get(proof_mint, 0) + proof["amount"]
+                        )
+
+                if untrusted_balances:
+                    suitable_untrusted = [
+                        (m, b) for m, b in untrusted_balances.items() if b >= amount
+                    ]
+                    if suitable_untrusted:
+                        untrusted_details = ", ".join(
+                            f"{m}: {b} {unit}" for m, b in suitable_untrusted
+                        )
+                        raise WalletError(
+                            f"{e}\n\n"
+                            f"💡 Found sufficient balance in untrusted mints:\n{untrusted_details}\n\n"
+                            f"To use an untrusted mint, specify it explicitly:\n"
+                            f'  await wallet.send({amount}, mint_url="<mint_url>")'
+                        ) from e
+                raise
 
         mint = self._get_mint(mint_url)
 
         # Filter proofs by the requested currency unit AND mint
+        # Note: mint.url is already normalized by _get_mint
         unit_proofs = [p for p in state.proofs if p.get("unit") == unit]
-        mint_unit_proofs = [p for p in unit_proofs if p.get("mint") == mint.url]
+        mint_unit_proofs = [
+            p for p in unit_proofs if normalize_mint_url(p.get("mint", "")) == mint.url
+        ]
         mint_unit_balance = sum(p["amount"] for p in mint_unit_proofs)
 
         if mint_unit_balance < amount:
@@ -656,7 +738,13 @@ class Wallet:
             )
 
         # check if enough balance in proofs from target mint
-        target_mint_proofs = [p for p in valid_proofs if p.get("mint") == target_mint]
+        # Normalize both the target mint and proof mints for comparison
+        normalized_target = normalize_mint_url(target_mint)
+        target_mint_proofs = [
+            p
+            for p in valid_proofs
+            if normalize_mint_url(p.get("mint", "")) == normalized_target
+        ]
         target_mint_balance = sum(p["amount"] for p in target_mint_proofs)
         if target_mint_balance < amount:
             raise WalletError(
@@ -1184,26 +1272,106 @@ class Wallet:
             return 0, "sat"
 
         # Assume all proofs from same mint
-        source_mint_url = proofs[0]["mint"]
-        if not all(p["mint"] == source_mint_url for p in proofs):
+        source_mint_url = normalize_mint_url(proofs[0]["mint"])
+        if not all(
+            normalize_mint_url(p.get("mint", "")) == source_mint_url for p in proofs
+        ):
             raise WalletError("Proofs must be from the same mint for transfer")
 
         source_mint = Mint(source_mint_url)
 
+        # Get the total amount in the source mint's native unit
+        total_amount_source_unit = sum(p["amount"] for p in proofs)
+        print("DEBUG PROOF", proofs[0])
+        source_unit = proofs[0].get("unit", "sat")
+
+        # Convert to sats for estimation
         total_amount_sats = await sats_value_of_proofs(proofs)
         if total_amount_sats == 0:
             return 0, "sat"
 
+        # Estimate Lightning fees: typically 1% or minimum 2 sats
+        estimated_fee_sats = max(int(total_amount_sats * 0.01), 2)
+
+        # Calculate initial invoice amount after estimated fees
+        estimated_invoice_sats = total_amount_sats - estimated_fee_sats
+
+        # Ensure we're trying to mint at least 1 sat
+        if estimated_invoice_sats < 1:
+            raise WalletError(
+                f"Amount too small to swap after fees. Have {total_amount_sats} sats, "
+                f"estimated fees {estimated_fee_sats} sats"
+            )
+
+        # Create invoice for the amount minus estimated fees
         invoice, mint_task = await self.mint_async(
-            total_amount_sats, mint_url=target_mint
+            estimated_invoice_sats, mint_url=target_mint, unit=target_unit
         )
 
+        # Get the actual melt quote to see if we have enough
         melt_quote = await source_mint.create_melt_quote(
             request=invoice,
         )
         fee_reserve = melt_quote.get("fee_reserve", 0)
-        total_needed = total_amount_sats + fee_reserve
-        self.raise_if_insufficient_balance(await self.get_balance(), total_needed)
+
+        # Calculate total needed in the source mint's unit
+        # The invoice amount is in msat if going through Lightning
+        invoice_amount_msat = estimated_invoice_sats * 1000
+
+        # For msat mint, fees are in msat
+        if source_unit == "msat":
+            total_needed_source_unit = invoice_amount_msat + fee_reserve
+        elif source_unit == "sat":
+            # For sat mint, convert invoice to sats and add fees
+            total_needed_source_unit = (invoice_amount_msat // 1000) + fee_reserve
+        else:
+            # For other units, we'd need to handle conversion
+            raise WalletError(
+                f"Unsupported source unit for remote redemption: {source_unit}"
+            )
+
+        # Check if we have enough in the source unit
+        if total_amount_source_unit < total_needed_source_unit:
+            # Try with progressively smaller amounts
+            max_attempts = min(
+                estimated_invoice_sats - 1, 10
+            )  # Try up to 10 times or until we reach 1 sat
+            for attempt in range(max_attempts):
+                # Reduce by 1 sat each attempt
+                new_invoice_sats = estimated_invoice_sats - (attempt + 1)
+                if new_invoice_sats < 1:
+                    raise WalletError(
+                        f"Insufficient balance after fees. Have {total_amount_source_unit} {source_unit}, "
+                        f"but even 1 sat invoice requires {total_needed_source_unit} {source_unit} including fees"
+                    )
+
+                # Cancel the previous mint task
+                mint_task.cancel()
+
+                # Try with reduced amount
+                invoice, mint_task = await self.mint_async(
+                    new_invoice_sats, mint_url=target_mint, unit=target_unit
+                )
+
+                # Get new melt quote
+                melt_quote = await source_mint.create_melt_quote(
+                    request=invoice,
+                )
+                fee_reserve = melt_quote.get("fee_reserve", 0)
+
+                # Recalculate total needed
+                invoice_amount_msat = new_invoice_sats * 1000
+                if source_unit == "msat":
+                    total_needed_source_unit = invoice_amount_msat + fee_reserve
+                elif source_unit == "sat":
+                    total_needed_source_unit = (
+                        invoice_amount_msat // 1000
+                    ) + fee_reserve
+
+                if total_amount_source_unit >= total_needed_source_unit:
+                    # Update the final amount for return
+                    estimated_invoice_sats = new_invoice_sats
+                    break
 
         melt_resp = await source_mint.melt(
             quote=melt_quote["quote"], inputs=cast(list[ProofComplete], proofs)
@@ -1217,7 +1385,7 @@ class Wallet:
 
         await mint_task
 
-        return total_amount_sats, target_unit
+        return estimated_invoice_sats, target_unit
 
     async def transfer_balance_to_mint(
         self,
@@ -1232,10 +1400,21 @@ class Wallet:
 
         if not from_mint:
             mint_sats_balances: dict[str, int] = {}
-            for mint in set(p["mint"] for p in state.proofs if "mint" in p):
-                if mint in exclude_mints or mint == to_mint:
+            normalized_to_mint = normalize_mint_url(to_mint)
+            normalized_excludes = [normalize_mint_url(m) for m in exclude_mints]
+
+            for mint in set(
+                normalize_mint_url(p.get("mint", ""))
+                for p in state.proofs
+                if p.get("mint")
+            ):
+                if mint in normalized_excludes or mint == normalized_to_mint:
                     continue
-                mint_proofs = [p for p in state.proofs if p["mint"] == mint]
+                mint_proofs = [
+                    p
+                    for p in state.proofs
+                    if normalize_mint_url(p.get("mint", "")) == mint
+                ]
                 mint_sats = await sats_value_of_proofs(mint_proofs)
                 if mint_sats > 0:
                     mint_sats_balances[mint] = mint_sats
@@ -1243,7 +1422,11 @@ class Wallet:
                 raise WalletError("No source mints with balance available")
             from_mint = max(mint_sats_balances, key=lambda k: mint_sats_balances[k])
 
-        proofs_from_mint = [p for p in state.proofs if p.get("mint") == from_mint]
+        proofs_from_mint = [
+            p
+            for p in state.proofs
+            if normalize_mint_url(p.get("mint", "")) == normalize_mint_url(from_mint)
+        ]
         total_sats_from_mint = await sats_value_of_proofs(proofs_from_mint)
         transfer_sats = min(amount_sats, total_sats_from_mint)
         if transfer_sats <= 0:
@@ -1277,9 +1460,11 @@ class Wallet:
 
     def _get_mint(self, mint_url: str) -> Mint:
         """Get or create mint instance for URL."""
-        if mint_url not in self.mints:
-            self.mints[mint_url] = Mint(mint_url)
-        return self.mints[mint_url]
+        # Normalize URL to handle trailing slashes
+        normalized_url = normalize_mint_url(mint_url)
+        if normalized_url not in self.mints:
+            self.mints[normalized_url] = Mint(normalized_url)
+        return self.mints[normalized_url]
 
     def _serialize_proofs_for_token(
         self,
@@ -1396,6 +1581,9 @@ class Wallet:
             token_unit: CurrencyUnit = cast(CurrencyUnit, unit_str)
             token_proofs = mint_info["proofs"]
 
+            # Normalize mint URL
+            normalized_mint = normalize_mint_url(mint_info["mint"])
+
             # Return proofs with hex secrets (standard Cashu format)
             parsed_proofs: list[Proof] = []
             for proof in token_proofs:
@@ -1405,12 +1593,12 @@ class Wallet:
                         amount=proof["amount"],
                         secret=proof["secret"],  # Already hex in Cashu tokens
                         C=proof["C"],
-                        mint=mint_info["mint"],
+                        mint=normalized_mint,
                         unit=token_unit,
                     )
                 )
 
-            return mint_info["mint"], token_unit, parsed_proofs
+            return normalized_mint, token_unit, parsed_proofs
 
         elif token.startswith("cashuB"):
             # Version 4 - CBOR format
@@ -1426,7 +1614,7 @@ class Wallet:
 
             # Extract from CBOR format - different structure
             # 'm' = mint URL, 'u' = unit, 't' = tokens array
-            mint_url = token_data["m"]
+            mint_url = normalize_mint_url(token_data["m"])
             unit_str = token_data["u"]
             # Cast to CurrencyUnit
             cbor_unit: CurrencyUnit = cast(CurrencyUnit, unit_str)
@@ -1529,34 +1717,37 @@ class Wallet:
                 proofs_to_check.append(proof)
 
         if proofs_to_check:
-            for mint_url, mint_proofs in self._sort_proofs_by_mint(
-                proofs_to_check
-            ).items():
+
+            async def validate_mint_proofs(
+                mint_url: str, mint_proofs: list[Proof]
+            ) -> list[Proof]:
                 try:
                     mint = self._get_mint(mint_url)
                     y_values = self._compute_proof_y_values(mint_proofs)
                     state_response = await mint.check_state(Ys=y_values)
-
+                    result: list[Proof] = []
                     for i, proof in enumerate(mint_proofs):
                         proof_id = f"{proof['secret']}:{proof['C']}"
                         if i < len(state_response["states"]):
                             state_info = state_response["states"][i]
                             state = state_info.get("state", "UNKNOWN")
-
-                            # Cache the result
                             self._cache_proof_state(proof_id, state)
-
-                            # Only include unspent proofs
                             if state == "UNSPENT":
-                                valid_proofs.append(proof)
-
+                                result.append(proof)
                         else:
-                            # No state info - assume valid but don't cache
-                            valid_proofs.append(proof)
-
+                            result.append(proof)
+                    return result
                 except Exception:
-                    # If validation fails, include proofs but don't cache
-                    valid_proofs.extend(mint_proofs)
+                    return mint_proofs
+
+            mint_proof_map = self._sort_proofs_by_mint(proofs_to_check)
+            tasks = [
+                validate_mint_proofs(mint_url, mint_proofs)
+                for mint_url, mint_proofs in mint_proof_map.items()
+            ]
+            results = await asyncio.gather(*tasks)
+            for valid in results:
+                valid_proofs.extend(valid)
 
         return valid_proofs
 
@@ -1603,8 +1794,11 @@ class Wallet:
                 # If wallet event contains mint URLs, use those as the source of truth
                 # This replaces any mint URLs from constructor or environment
                 if event_mint_urls:
-                    # Deduplicate mint URLs from wallet event (in case they were stored with duplicates)
-                    self.mint_urls = list(dict.fromkeys(event_mint_urls))
+                    # Normalize and deduplicate mint URLs from wallet event
+                    normalized_urls = [
+                        normalize_mint_url(url) for url in event_mint_urls
+                    ]
+                    self.mint_urls = list(dict.fromkeys(normalized_urls))
                     # Also update the event manager with the correct mint URLs
                     self.event_manager.mint_urls = self.mint_urls
             except Exception as e:
@@ -1660,6 +1854,9 @@ class Wallet:
             if not mint_url:
                 raise WalletError("No mint URL found in token event")
 
+            # Normalize mint URL
+            mint_url = normalize_mint_url(mint_url)
+
             for proof in proofs:
                 # Convert from NIP-60 format (base64) to internal format (hex)
                 # NIP-60 stores secrets as base64, but internally we use hex
@@ -1700,6 +1897,9 @@ class Wallet:
             mint_url = token_data.get("mint")
             if not mint_url or not isinstance(mint_url, str):
                 raise WalletError("No mint URL found in pending token event")
+
+            # Normalize mint URL
+            mint_url = normalize_mint_url(mint_url)
 
             proofs = token_data.get("proofs", [])
             if not isinstance(proofs, list):
@@ -1837,7 +2037,11 @@ class Wallet:
         return WalletState(proofs=all_proofs, proof_to_event_id=proof_to_event_id)
 
     async def get_balance(
-        self, unit: CurrencyUnit | None = None, *, check_proofs: bool = True
+        self,
+        unit: CurrencyUnit | None = None,
+        *,
+        check_proofs: bool = True,
+        include_shitnuts: bool = False,
     ) -> int:
         """Get current wallet balance.
 
@@ -1858,12 +2062,18 @@ class Wallet:
             if unit not in state.balance_by_unit:
                 raise WalletError(f"Unsupported currency unit: {unit}")
             return state.balance_by_unit[unit]
-        return await state.total_balance_sat()
+        return await state.total_balance_sat(include_shitnuts=include_shitnuts)
 
     async def get_balance_by_mint(self, mint_url: str) -> int:
         """Get balance for a specific mint."""
         state = await self.fetch_wallet_state(check_proofs=True)
-        return sum(p["amount"] for p in state.proofs if p["mint"] == mint_url)
+        # Normalize mint URL for comparison
+        normalized_mint = normalize_mint_url(mint_url)
+        return sum(
+            p["amount"]
+            for p in state.proofs
+            if normalize_mint_url(p.get("mint", "")) == normalized_mint
+        )
 
     # ─────────────────────────────── Cleanup ──────────────────────────────────
 
@@ -2139,7 +2349,12 @@ class Wallet:
         return sorted(self.mint_urls)[0]  # Use sorted order for consistency
 
     async def _select_mint_for_amount(
-        self, amount: int, unit: CurrencyUnit, proofs: list[Proof] | None = None
+        self,
+        amount: int,
+        unit: CurrencyUnit,
+        proofs: list[Proof] | None = None,
+        *,
+        trusted_only: bool = True,
     ) -> str:
         """Select the best mint that has sufficient balance for the given amount and unit.
 
@@ -2147,6 +2362,7 @@ class Wallet:
             amount: Amount needed in the specified unit
             unit: Currency unit
             proofs: Optional list of proofs to use (if None, fetches wallet state)
+            trusted_only: If True, only consider mints in self.mint_urls
 
         Returns:
             Mint URL with sufficient balance
@@ -2172,8 +2388,16 @@ class Wallet:
         for proof in unit_proofs:
             proof_mint = proof.get("mint", "")
             if proof_mint:
-                mint_unit_balances[proof_mint] = (
-                    mint_unit_balances.get(proof_mint, 0) + proof["amount"]
+                normalized_proof_mint = normalize_mint_url(proof_mint)
+                # Skip untrusted mints if trusted_only is True
+                if (
+                    trusted_only
+                    and self.mint_urls
+                    and normalized_proof_mint not in self.mint_urls
+                ):
+                    continue
+                mint_unit_balances[normalized_proof_mint] = (
+                    mint_unit_balances.get(normalized_proof_mint, 0) + proof["amount"]
                 )
 
         # Find mints with sufficient balance
@@ -2182,23 +2406,59 @@ class Wallet:
         ]
 
         if not suitable_mints:
+            # Calculate total balance including untrusted mints for better error message
+            total_trusted_balance = sum(mint_unit_balances.values())
             total_unit_balance = sum(p["amount"] for p in unit_proofs)
+
             mint_details = ", ".join(
                 f"{m}: {b}" for m, b in sorted(mint_unit_balances.items())
             )
-            raise WalletError(
-                f"Insufficient {unit.upper()} balance: need {amount}, have {total_unit_balance} "
-                f"(distributed across mints: {mint_details})"
-            )
 
-        # Select the mint with the highest balance of this unit
-        return max(suitable_mints, key=lambda m: mint_unit_balances[m])
+            if trusted_only and total_unit_balance > total_trusted_balance:
+                untrusted_balance = total_unit_balance - total_trusted_balance
+                raise WalletError(
+                    f"Insufficient {unit.upper()} balance in trusted mints: need {amount}, "
+                    f"have {total_trusted_balance} in trusted mints "
+                    f"(plus {untrusted_balance} in untrusted mints). "
+                    f"Trusted mint balances: {mint_details}"
+                )
+            else:
+                raise WalletError(
+                    f"Insufficient {unit.upper()} balance: need {amount}, have {total_unit_balance} "
+                    f"(distributed across mints: {mint_details})"
+                )
+
+        # Sort suitable mints by balance (highest first)
+        suitable_mints.sort(key=lambda m: mint_unit_balances[m], reverse=True)
+
+        # Try to check connectivity for each mint and return the first reachable one
+        for mint_candidate in suitable_mints:
+            try:
+                # Quick connectivity check - just try to get mint info
+                test_mint = self._get_mint(mint_candidate)
+                # Try a lightweight request to check if mint is reachable
+                await asyncio.wait_for(test_mint.get_info(), timeout=5.0)
+                return mint_candidate
+            except Exception as e:
+                # Log the error but continue to next mint
+                print(f"⚠️  Mint {mint_candidate} is not reachable: {e}")
+                continue
+
+        # If no reachable mint found, raise error
+        raise WalletError(
+            f"No reachable mint found with sufficient {unit.upper()} balance. "
+            f"Tried mints: {', '.join(suitable_mints)}"
+        )
 
     def _sort_proofs_by_mint(self, proofs: list[Proof]) -> dict[str, list[Proof]]:
-        return {
-            mint_url: [proof for proof in proofs if proof["mint"] == mint_url]
-            for mint_url in set(proof["mint"] for proof in proofs)
-        }
+        # Normalize mint URLs when grouping proofs
+        normalized_mints: dict[str, list[Proof]] = {}
+        for proof in proofs:
+            normalized_mint = normalize_mint_url(proof.get("mint", ""))
+            if normalized_mint not in normalized_mints:
+                normalized_mints[normalized_mint] = []
+            normalized_mints[normalized_mint].append(proof)
+        return normalized_mints
 
     async def _cleanup_spent_proof_backups(self) -> int:
         """Clean up backup files that only contain spent/invalid proofs.
@@ -2481,3 +2741,20 @@ async def sats_value_of_proofs(proofs: list[Proof]) -> int:
             exchange_rate = await Mint(proof["mint"]).mint_exchange_rate(proof["unit"])
             total_sats += int(proof["amount"] * exchange_rate)
     return total_sats
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# URL Normalization
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def normalize_mint_url(url: str) -> str:
+    """Normalize mint URL by removing trailing slashes.
+
+    Args:
+        url: Mint URL to normalize
+
+    Returns:
+        Normalized URL without trailing slashes
+    """
+    return url.rstrip("/")
