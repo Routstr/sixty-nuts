@@ -172,7 +172,6 @@ class Wallet:
         """
         # Parse token
         mint_url, unit, proofs = self._parse_cashu_token(token)
-        print("DEBUG", mint_url, unit)
 
         # Normalize mint URL for comparison
         mint_url = normalize_mint_url(mint_url)
@@ -180,13 +179,11 @@ class Wallet:
         # Check if this is a trusted mint
         if auto_swap and self.mint_urls and mint_url not in self.mint_urls:
             # Token is from untrusted mint - swap to our primary mint
-            print("DEBUG SWAP", self._primary_mint_url())
             return await self.remote_redeem_proofs(proofs, self._primary_mint_url())
 
         # Proceed with normal redemption for trusted mints
         # Calculate total amount
         total_amount = sum(p["amount"] for p in proofs)
-        print("DEBUG TOTAL AMOUNT", total_amount)
 
         # Get mint instance to calculate fees
         mint = self._get_mint(mint_url)
@@ -645,7 +642,6 @@ class Wallet:
         if not proofs:
             state = await self.fetch_wallet_state(check_proofs=True)
             proofs = state.proofs
-            # TODO: these proofs are not used anywhere following logic needs to be updated
 
         # Get currency unit from the first proof
         unit = proofs[0].get("unit") or "sat"
@@ -1282,7 +1278,6 @@ class Wallet:
 
         # Get the total amount in the source mint's native unit
         total_amount_source_unit = sum(p["amount"] for p in proofs)
-        print("DEBUG PROOF", proofs[0])
         source_unit = proofs[0].get("unit", "sat")
 
         # Convert to sats for estimation

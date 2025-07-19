@@ -364,7 +364,6 @@ class Mint:
                     return rate
 
             # Cache miss or expired - fetch new rate
-            # TODO: test this
             quote = await self.create_mint_quote(amount=1000, unit=unit)
             invoice_amount_sats = parse_lightning_invoice_amount(
                 quote["request"], "sat"
