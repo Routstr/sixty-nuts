@@ -17,28 +17,18 @@ from collections.abc import Generator
 from sixty_nuts.wallet import Wallet
 from sixty_nuts.crypto import generate_privkey
 
+# Import utils module
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import get_relay_wait_time
+
 
 # Skip all integration tests unless explicitly enabled
 pytestmark = pytest.mark.skipif(
     not os.getenv("RUN_INTEGRATION_TESTS"),
     reason="Integration tests only run when RUN_INTEGRATION_TESTS is set",
 )
-
-
-def get_relay_wait_time(base_seconds: float = 2.0) -> float:
-    """Get appropriate wait time based on service type.
-
-    Args:
-        base_seconds: Base wait time for local services
-
-    Returns:
-        Wait time in seconds (longer for public relays due to rate limiting)
-    """
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return base_seconds
-    else:
-        # Public relays need longer waits due to rate limiting
-        return base_seconds * 3.0  # 3x longer for public relays
 
 
 @pytest.fixture

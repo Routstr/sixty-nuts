@@ -622,42 +622,5 @@ class TestMintPerformance:
         print("✅ Connection reuse working correctly")
 
 
-if __name__ == "__main__":
-    # Allow running this file directly for debugging
-    import sys
-
-    if not os.getenv("RUN_INTEGRATION_TESTS"):
-        print("Set RUN_INTEGRATION_TESTS=1 to run integration tests")
-        print(
-            "Example: RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_mint_methods.py -v"
-        )
-        sys.exit(1)
-
-    # Run a simple smoke test
-    async def main() -> None:
-        mint = Mint("https://testnut.cashu.space")
-
-        try:
-            print("🔄 Testing mint connection...")
-            info: MintInfo = await mint.get_info()
-            print(f"✅ Connected to mint: {info.get('name', 'Unknown')}")
-
-            print("🔄 Testing keysets...")
-            keysets: list[Keyset] = await mint.get_active_keysets()
-            print(f"✅ Found {len(keysets)} keysets")
-
-            print("🔄 Testing quote creation...")
-            quote: PostMintQuoteResponse = await mint.create_mint_quote(
-                unit="sat", amount=100
-            )
-            print(f"✅ Created quote: {quote['quote']}")
-
-            print("✅ All basic tests passed!")
-
-        except Exception as e:
-            print(f"❌ Test failed: {e}")
-            raise
-        finally:
-            await mint.aclose()
-
-    asyncio.run(main())
+# Debug script removed - use pytest to run integration tests:
+# RUN_INTEGRATION_TESTS=1 python -m pytest tests/integration/test_mint_methods.py -v

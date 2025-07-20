@@ -24,20 +24,16 @@ from sixty_nuts.mint import (
     PostMintQuoteResponse,
     PostCheckStateResponse,
 )
+# Import utils module
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import get_relay_wait_time, get_timeout, retry_async, integration_test
 
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("RUN_INTEGRATION_TESTS"),
     reason="Integration tests only run when RUN_INTEGRATION_TESTS is set",
 )
-
-
-def get_relay_wait_time(base_seconds: float = 2.0) -> float:
-    """Get appropriate wait time based on service type."""
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return base_seconds
-    else:
-        return base_seconds * 3.0  # 3x longer for public relays
 
 
 class TestWalletBasicOperations:
@@ -56,9 +52,8 @@ class TestWalletBasicOperations:
         # Initialize wallet (requires relay connection)
         # Generate a wallet private key if not set
         if wallet.wallet_privkey is None:
-            import secrets
-
-            wallet.wallet_privkey = secrets.token_hex(32)
+            from sixty_nuts.crypto import generate_privkey
+            wallet.wallet_privkey = generate_privkey().replace("nsec1", "")
 
         # Initialize through event manager
         initialized: bool = await wallet.event_manager.initialize_wallet(
@@ -69,14 +64,15 @@ class TestWalletBasicOperations:
         # Give some time for the wallet event to propagate
         await asyncio.sleep(get_relay_wait_time(2.0))
 
-        # Check wallet event exists (requires relay connection)
-        exists: bool
-        event: Any
-        exists, event = await wallet.event_manager.check_wallet_event_exists()
-        if not exists:
-            # Try one more time in case of relay timing issues
-            await asyncio.sleep(get_relay_wait_time(3.0))
-            exists, event = await wallet.event_manager.check_wallet_event_exists()
+        # Check wallet event exists with retry
+        async def check_event() -> tuple[bool, Any]:
+            return await wallet.event_manager.check_wallet_event_exists()
+        
+        exists, event = await retry_async(
+            check_event,
+            max_retries=3,
+            delay=get_relay_wait_time(2.0)
+        )
 
         assert exists is True, "Wallet event should exist after initialization"
         assert event is not None
@@ -107,13 +103,9 @@ class TestWalletBasicOperations:
 class TestWalletMinting:
     """Test wallet minting operations that require mint API."""
 
+    @integration_test
     async def test_mint_async_flow(self, wallet: Wallet) -> None:
         """Test asynchronous minting flow with auto-paying test mint."""
-        # Add delay between test classes for public relays
-        if not os.getenv("USE_LOCAL_SERVICES"):
-            print("Adding delay between test classes to avoid rate limiting...")
-            await asyncio.sleep(15.0)  # 15 second delay for public relays
-
         # Create invoice - test mint should auto-pay
         invoice: str
         task: Any
@@ -122,36 +114,26 @@ class TestWalletMinting:
 
         # Wait for the auto-payment to complete
         try:
-            # Give reasonable time for auto-payment (longer for public relays)
-            timeout: float = (
-                30.0 if os.getenv("USE_LOCAL_SERVICES") else 90.0
-            )  # Increased from 60s
-            paid: bool = await asyncio.wait_for(task, timeout=timeout)
+            paid: bool = await asyncio.wait_for(task, timeout=get_timeout())
             assert paid is True, "Invoice should be auto-paid by test mint"
 
             # Give time for token events to propagate to relay
             await asyncio.sleep(get_relay_wait_time(2.0))
 
-            # Verify balance increased with retry for rate limiting
-            max_balance_retries: int = 8  # More retries for heavily rate-limited tests
-            base_delay: float = get_relay_wait_time(2.0)
-            balance: int = 0
-
-            for attempt in range(max_balance_retries):
+            # Verify balance increased with retry
+            async def check_balance() -> int:
                 balance = await wallet.get_balance()
-                if balance >= 25:
-                    break
-                if attempt < max_balance_retries - 1:
-                    # Exponential backoff for heavy rate limiting
-                    delay: float = base_delay * (1.5**attempt)
-                    print(
-                        f"Balance check attempt {attempt + 1}: {balance} sats, retrying in {delay:.1f}s..."
-                    )
-                    await asyncio.sleep(delay)
-
-            assert balance >= 25, (
-                f"Balance should be at least 25 sats, got {balance} after {max_balance_retries} attempts"
+                if balance < 25:
+                    raise ValueError(f"Balance {balance} is less than expected 25")
+                return balance
+            
+            balance = await retry_async(
+                check_balance,
+                max_retries=8,
+                delay=get_relay_wait_time(2.0)
             )
+            
+            assert balance >= 25, f"Balance should be at least 25 sats, got {balance}"
 
         except asyncio.TimeoutError:
             # If timeout, cancel the task and fail
@@ -168,11 +150,8 @@ class TestWalletMinting:
 class TestWalletTransactions:
     """Test wallet transaction operations that require mint validation."""
 
+    @integration_test
     async def test_send_insufficient_balance(self, wallet: Wallet) -> None:
-        # Add delay between test classes for public relays
-        if not os.getenv("USE_LOCAL_SERVICES"):
-            print("Adding delay between test classes to avoid rate limiting...")
-            await asyncio.sleep(15.0)  # 15 second delay for public relays
         """Test send with insufficient balance (should fail gracefully)."""
         # Empty wallet should fail to send
         with pytest.raises(Exception) as exc_info:

@@ -14,20 +14,17 @@ import pytest
 
 from sixty_nuts.wallet import Wallet
 
+# Import utils module
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import get_relay_wait_time, get_timeout, retry_async, integration_test
+
 
 # Skip all integration tests unless explicitly enabled
 pytestmark = pytest.mark.skipif(
     not os.getenv("RUN_INTEGRATION_TESTS"),
     reason="Integration tests only run when RUN_INTEGRATION_TESTS is set",
 )
-
-
-def get_relay_wait_time(base_seconds: float = 1.0) -> float:
-    """Get appropriate wait time based on service type."""
-    if os.getenv("USE_LOCAL_SERVICES"):
-        return base_seconds
-    else:
-        return base_seconds * 9.0  # 9x longer for public relays
 
 
 # Fixtures are imported from conftest.py automatically
@@ -51,27 +48,18 @@ class TestAdvancedWalletOperations:
 
         print("\n📊 Phase 1: Initial state validation")
 
-        # Check relay connections first
-        try:
-            relay_connections = await wallet.relay_manager.get_relay_connections()
-            print(
-                f"Connected to {len(relay_connections)} relays: {[r.url for r in relay_connections]}"
-            )
-        except Exception as e:
-            print(f"Warning: Could not get relay connections: {e}")
-
         # Validate initial empty state
         initial_balance: int = await wallet.get_balance(check_proofs=False)
-        assert initial_balance == 0, (
-            f"Expected empty wallet, got {initial_balance} sats"
-        )
-
+        assert initial_balance == 0, f"Expected empty wallet, got {initial_balance} sats"
+        
+        # Count initial token events with proper error handling
+        initial_token_events: int = 0
         try:
-            initial_token_events: int = await wallet.event_manager.count_token_events()
+            initial_token_events = await wallet.event_manager.count_token_events()
             print(f"Initial token events: {initial_token_events}")
-        except Exception as e:
-            print(f"Warning: Could not count token events: {e}")
-            initial_token_events = 0
+        except AttributeError:
+            # Method might not exist in all versions
+            print("Warning: count_token_events method not available")
 
         initial_state = await wallet.fetch_wallet_state(check_proofs=False)
         assert len(initial_state.proofs) == 0, "Expected no proofs initially"
@@ -107,12 +95,17 @@ class TestAdvancedWalletOperations:
 
         for i, amount in enumerate(mint_amounts):
             print(f"\n  Minting {amount} sats (operation {i + 1}/{len(mint_amounts)})")
+            
+            # Add delay between mints to avoid rate limiting
+            if i > 0:
+                await asyncio.sleep(get_relay_wait_time(3.0))
 
             balance_before: int = await wallet.get_balance()
+            events_before: int = 0
             try:
-                events_before: int = await wallet.event_manager.count_token_events()
-            except Exception:
-                events_before = 0
+                events_before = await wallet.event_manager.count_token_events()
+            except AttributeError:
+                pass  # Method might not exist
 
             # Create and wait for auto-payment
             invoice: str
@@ -120,46 +113,41 @@ class TestAdvancedWalletOperations:
             invoice, task = await wallet.mint_async(amount)
             print(f"    Created invoice: {invoice[:50]}...")
 
-            timeout: float = 30.0 if os.getenv("USE_LOCAL_SERVICES") else 60.0
-            paid: bool = await asyncio.wait_for(task, timeout=timeout)
+            paid: bool = await asyncio.wait_for(task, timeout=get_timeout())
             assert paid is True, f"Invoice {i + 1} should be auto-paid"
 
             # Wait for events to propagate
-            await asyncio.sleep(get_relay_wait_time(1.0))
+            await asyncio.sleep(get_relay_wait_time(2.0))
 
             # Validate balance increase with retry logic
-            max_retries: int = 5
-
-            for attempt in range(max_retries):
-                balance_after = await wallet.get_balance()
-                try:
-                    events_after = await wallet.event_manager.count_token_events()
-                except Exception:
-                    events_after = events_before
-
-                if balance_after == balance_before + amount:
-                    break
-
-                if attempt < max_retries - 1:
-                    print(
-                        f"    Balance check attempt {attempt + 1}: {balance_after} sats, retrying..."
-                    )
-                    await asyncio.sleep(get_relay_wait_time(2.0))
+            async def check_balance() -> int:
+                current = await wallet.get_balance()
+                expected = balance_before + amount
+                if current != expected:
+                    # Try refreshing the state in case of sync issues
+                    await wallet.fetch_wallet_state(check_proofs=False)
+                    current = await wallet.get_balance()
+                return current
+            
+            balance_after = await retry_async(
+                check_balance,
+                max_retries=8,
+                delay=get_relay_wait_time(2.0)
+            )
 
             # Validate mint results
             assert balance_after == balance_before + amount, (
                 f"Balance should increase by {amount}, got {balance_after - balance_before}"
             )
-
-            # Event count validation - be more lenient for integration tests
-            if events_after == events_before + 1:
-                print(f"    Events increased by 1: {events_before} → {events_after}")
-            else:
-                print(
-                    f"    Warning: Events didn't increase by 1 ({events_before} → {events_after})"
-                )
-                print("    This may be due to relay connection issues or timing delays")
-                # Don't fail the test on event count issues in integration tests
+            
+            # Try to get event count if method exists
+            events_after: int = events_before
+            try:
+                events_after = await wallet.event_manager.count_token_events()
+                if events_after > events_before:
+                    print(f"    Events increased: {events_before} → {events_after}")
+            except AttributeError:
+                pass  # Method might not exist
 
             # Update metrics
             metrics["total_minted"] += amount
