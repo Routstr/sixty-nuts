@@ -417,3 +417,101 @@ class TestWalletInsufficientBalanceCheck:
 
         with pytest.raises(WalletError, match="Insufficient balance"):
             wallet.raise_if_insufficient_balance(0, 1)
+
+
+class TestWalletRolloverProofs:
+    """Test roll_over_proofs functionality."""
+
+    @pytest.mark.asyncio
+    async def test_roll_over_proofs_success(self) -> None:
+        """Test successful proof rollover."""
+        wallet = Wallet(
+            nsec=generate_privkey(),
+            mint_urls=["http://test.mint"],
+            relay_urls=["ws://test.relay"],
+        )
+
+        spent_proofs: list[Proof] = [
+            {
+                "id": "test1",
+                "amount": 10,
+                "secret": "secret1",
+                "C": "C1",
+                "mint": "http://test.mint",
+                "unit": "sat",
+            }
+        ]
+
+        unspent_proofs: list[Proof] = [
+            {
+                "id": "test2",
+                "amount": 20,
+                "secret": "secret2",
+                "C": "C2",
+                "mint": "http://test.mint",
+                "unit": "sat",
+            }
+        ]
+
+        deleted_event_ids = ["event1", "event2"]
+
+        with patch.object(wallet.event_manager, 'publish_token_event', new_callable=AsyncMock) as mock_publish:
+            mock_publish.return_value = "new_event_id"
+            
+            result = await wallet.roll_over_proofs(
+                spent_proofs=spent_proofs,
+                unspent_proofs=unspent_proofs,
+                deleted_event_ids=deleted_event_ids,
+            )
+
+            assert result == "new_event_id"
+            mock_publish.assert_called_once_with(
+                unspent_proofs, deleted_token_ids=deleted_event_ids
+            )
+
+    @pytest.mark.asyncio
+    async def test_roll_over_proofs_no_unspent(self) -> None:
+        """Test rollover with no unspent proofs raises error."""
+        from sixty_nuts.types import WalletError
+
+        wallet = Wallet(
+            nsec=generate_privkey(),
+            mint_urls=["http://test.mint"],
+            relay_urls=["ws://test.relay"],
+        )
+
+        with pytest.raises(WalletError, match="No unspent proofs to roll over"):
+            await wallet.roll_over_proofs(
+                spent_proofs=[],
+                unspent_proofs=[],
+                deleted_event_ids=["event1"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_roll_over_proofs_no_deleted_events(self) -> None:
+        """Test rollover with no deleted event IDs raises error."""
+        from sixty_nuts.types import WalletError
+
+        wallet = Wallet(
+            nsec=generate_privkey(),
+            mint_urls=["http://test.mint"],
+            relay_urls=["ws://test.relay"],
+        )
+
+        unspent_proofs: list[Proof] = [
+            {
+                "id": "test1",
+                "amount": 10,
+                "secret": "secret1",
+                "C": "C1",
+                "mint": "http://test.mint",
+                "unit": "sat",
+            }
+        ]
+
+        with pytest.raises(WalletError, match="No deleted event IDs provided for rollover"):
+            await wallet.roll_over_proofs(
+                spent_proofs=[],
+                unspent_proofs=unspent_proofs,
+                deleted_event_ids=[],
+            )
