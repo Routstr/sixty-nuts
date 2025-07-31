@@ -624,7 +624,43 @@ class Wallet:
         unspent_proofs: list[Proof],
         deleted_event_ids: list[str],
     ) -> str:
-        return ""  # TODO: Implement roll over logic for wallet cleanup
+        """Roll over unspent proofs after a partial spend and return new token id.
+        
+        This creates a new token event containing only the unspent proofs and marks
+        the old token event as superseded using the del field. Critical for proper
+        NIP-60 state transitions and preventing double-spending.
+        
+        Args:
+            spent_proofs: List of proofs that were spent (not used in rollover)
+            unspent_proofs: List of proofs to roll over to new event
+            deleted_event_ids: List of old event IDs to mark as superseded
+            
+        Returns:
+            New token event ID containing the rolled over proofs
+            
+        Raises:
+            WalletError: If no unspent proofs provided or event publishing fails
+        """
+        if not unspent_proofs:
+            raise WalletError("No unspent proofs to roll over")
+            
+        if not deleted_event_ids:
+            raise WalletError("No deleted event IDs provided for rollover")
+        
+        try:
+            # Use EventManager to publish new token event with rollover
+            event_id = await self.event_manager.publish_token_event(
+                unspent_proofs,
+                deleted_token_ids=deleted_event_ids,
+            )
+            
+            if not event_id:
+                raise WalletError("Failed to publish rollover token event")
+                
+            return event_id
+            
+        except Exception as e:
+            raise WalletError(f"Failed to roll over proofs: {e}") from e
 
     async def _consolidate_proofs(
         self, proofs: list[Proof], target_mint: str | None = None
